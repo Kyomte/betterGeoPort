@@ -398,7 +398,17 @@ def cancel_download():
 def clear_cache():
     d = request.get_json(force=True, silent=True) or {}
     provider = d.get("provider")
+    # Only ever clear a known provider's folder (or the whole cache). Without
+    # this, a value like "../../.." would let this delete files outside the
+    # cache — and the app runs as root.
+    if provider is not None and provider not in PROVIDERS:
+        return jsonify({"error": "Unknown provider"}), 400
     target = os.path.join(CACHE_ROOT, provider) if provider else CACHE_ROOT
+    # Defence in depth: never operate outside the cache root.
+    root_real = os.path.realpath(CACHE_ROOT)
+    if not (os.path.realpath(target) == root_real or
+            os.path.realpath(target).startswith(root_real + os.sep)):
+        return jsonify({"error": "Invalid path"}), 400
     removed = 0
     if os.path.isdir(target):
         for root, _dirs, files in os.walk(target, topdown=False):
