@@ -20,7 +20,7 @@ import threading
 
 from pymobiledevice3.lockdown import create_using_usbmux
 from pymobiledevice3.services.amfi import AmfiService
-from pymobiledevice3.cli.mounter import auto_mount
+from pymobiledevice3.services.mobile_image_mounter import auto_mount
 from pymobiledevice3.exceptions import DeviceHasPasscodeSetError
 from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import DvtSecureSocketProxyService
 from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
