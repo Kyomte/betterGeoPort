@@ -28,9 +28,6 @@ import requests
 import pycountry
 from flask import Flask, jsonify, render_template, request
 
-from urllib3.exceptions import InsecureRequestWarning
-requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
-
 from pymobiledevice3.usbmux import list_devices
 from pymobiledevice3.lockdown import create_using_usbmux, create_using_tcp
 
@@ -65,6 +62,20 @@ app.register_blueprint(tiles_bp)
 manager = DeviceManager()
 pending = {}                      # udid -> (lat, lng) staged by /update_location
 
+# This server controls real devices and runs as root, so reject any request
+# whose Host header isn't local. That blocks DNS-rebinding attacks where a
+# malicious website resolves its name to 127.0.0.1 to reach this server.
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+if args.host and args.host not in ("127.0.0.1", "0.0.0.0"):
+    _ALLOWED_HOSTS.add(args.host)
+
+
+@app.before_request
+def _guard_host():
+    host = (request.host or "").rsplit(":", 1)[0].strip("[]")
+    if host not in _ALLOWED_HOSTS:
+        return jsonify({"error": "Forbidden host"}), 403
+
 APP_VERSION_NUMBER = "4.1.0-offline"
 APP_VERSION_TYPE = "offline+multi"
 GITHUB_REPO = "davesc63/GeoPort"
@@ -97,11 +108,9 @@ def get_user_country():
             country = pycountry.countries.get(alpha_2=loc.split('_')[-1])
             if country:
                 return country.name
-        r = requests.get("http://ip-api.com/json/", timeout=2)
-        if r.status_code == 200:
-            return r.json().get("country")
     except Exception:                                   # noqa: BLE001
         pass
+    # No third-party IP-geolocation fallback (privacy): just default the map.
     return None
 
 
@@ -115,7 +124,7 @@ def refresh_app_meta():
     except Exception:                                   # noqa: BLE001
         pass
     try:
-        app_meta["fuel"] = requests.get(FUEL_API_URL, verify=False, timeout=3).json()
+        app_meta["fuel"] = requests.get(FUEL_API_URL, timeout=3).json()
     except Exception:                                   # noqa: BLE001
         app_meta["fuel"] = None
 
