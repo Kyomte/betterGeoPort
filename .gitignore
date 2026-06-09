@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+
+# OS / editor
+.DS_Store
+
+# Local helpers not meant for the repo
+verify_ui.py          # needs Playwright + Chrome
+templates_backup/     # snapshot of the original UI

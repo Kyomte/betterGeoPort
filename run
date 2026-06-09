@@ -1,0 +1,4 @@
+#!/bin/bash
+# GeoPort launcher. iOS 17+ location-setting needs root, so run with: sudo ./run
+cd "$(dirname "$0")"
+exec .venv/bin/python main.py "$@"

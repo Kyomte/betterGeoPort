@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GeoPort — iOS Location Simulator</title>
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css" />
+  <style>
+    :root{
+      --bg:#0f1115; --panel:#171a21; --panel2:#1f232c; --line:#2a2f3a;
+      --txt:#e7ebf2; --muted:#9aa3b2; --accent:#3b82f6; --accent2:#2563eb;
+      --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; --chip:#262b35;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--txt);background:var(--bg)}
+    #app{display:flex;height:100%}
+    #sidebar{width:360px;min-width:360px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
+    #map{flex:1}
+    header{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+    header .logo{font-weight:700;font-size:18px;letter-spacing:.3px}
+    header .ver{font-size:11px;color:var(--muted);margin-left:auto}
+    .badge{display:inline-flex;align-items:center;gap:6px;font-size:11px;padding:3px 8px;border-radius:999px;background:var(--chip);color:var(--muted)}
+    .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
+    .dot.on{background:var(--ok)} .dot.off{background:var(--err)}
+    .scroll{overflow-y:auto;flex:1}
+    section{padding:14px 16px;border-bottom:1px solid var(--line)}
+    section h2{margin:0 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);display:flex;align-items:center;gap:8px}
+    section h2 .right{margin-left:auto;display:flex;gap:6px}
+    button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--txt);padding:7px 10px;border-radius:8px;transition:.15s}
+    button:hover{border-color:#3a4250;background:#252b36}
+    button:active{transform:translateY(1px)}
+    button.primary{background:var(--accent);border-color:var(--accent2)}
+    button.primary:hover{background:var(--accent2)}
+    button.sm{padding:4px 8px;font-size:12px;border-radius:6px}
+    button.danger{color:#fff;background:#3a2230;border-color:#5b2a3a}
+    button.danger:hover{background:#52283a}
+    button:disabled{opacity:.45;cursor:not-allowed}
+    .row{display:flex;gap:8px;align-items:center}
+    .row.wrap{flex-wrap:wrap}
+    .grow{flex:1}
+    .muted{color:var(--muted)}
+    .small{font-size:12px}
+    .device{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px}
+    .device .top{display:flex;align-items:center;gap:8px}
+    .device .pin{width:12px;height:12px;border-radius:50%;flex:none;box-shadow:0 0 0 2px rgba(255,255,255,.12)}
+    .device .name{font-weight:600;font-size:14px}
+    .device .meta{font-size:11px;color:var(--muted);margin-top:2px}
+    .chip{font-size:10px;padding:2px 6px;border-radius:5px;background:var(--chip);color:var(--muted)}
+    .chip.usb{color:#93c5fd} .chip.wifi{color:#86efac}
+    .chip.transport{cursor:pointer;opacity:.45;border:1px solid transparent;transition:.12s}
+    .chip.transport.active{opacity:1;outline:1px solid currentColor}
+    .chip.transport.locked{cursor:default;opacity:1}
+    .device .actions{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}
+    .status{font-size:11px;margin-top:6px}
+    .status .s-idle{color:var(--muted)} .status .s-connected{color:#93c5fd}
+    .status .s-locating{color:var(--ok)} .status .s-error{color:var(--err)} .status .s-connecting{color:var(--warn)}
+    select,input[type=text],input[type=number]{font:inherit;background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:7px 9px;width:100%}
+    input[type=number]{width:auto;flex:1}
+    label.fld{font-size:11px;color:var(--muted);display:block;margin:8px 0 4px}
+    .coords{font-variant-numeric:tabular-nums;font-size:13px}
+    .progress{height:8px;background:var(--chip);border-radius:999px;overflow:hidden;margin-top:8px;display:none}
+    .progress > i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+    .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#0b0d11;border:1px solid var(--line);padding:10px 16px;border-radius:10px;font-size:13px;box-shadow:0 8px 30px rgba(0,0,0,.5);opacity:0;transition:.25s;pointer-events:none;z-index:9999;max-width:70vw}
+    .toast.show{opacity:1}
+    .toast.err{border-color:#5b2a3a;color:#fda4af}
+    .toast.ok{border-color:#1f5132;color:#86efac}
+    .leaflet-container{background:#0b0d11}
+    .pin-marker{filter:drop-shadow(0 2px 3px rgba(0,0,0,.6))}
+    .hint{font-size:11px;color:var(--muted);line-height:1.5}
+    #sudoWarn{display:none;background:#16202e;border-bottom:1px solid #24364d;color:#9cc4ef;font-size:12px;padding:9px 16px;line-height:1.45}
+    .steps{counter-reset:s;margin:4px 0 2px;padding:0;list-style:none}
+    .steps li{counter-increment:s;position:relative;padding:5px 0 5px 28px;font-size:12.5px;color:var(--muted);line-height:1.45}
+    .steps li::before{content:counter(s);position:absolute;left:0;top:4px;width:18px;height:18px;border-radius:50%;background:var(--accent);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center}
+    .sec-toggle{width:100%;display:flex;align-items:center;gap:8px;background:transparent;border:none;padding:0;margin:0;color:var(--muted);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;cursor:pointer}
+    .sec-toggle:hover{color:var(--txt);background:transparent;border:none}
+    .sec-toggle .chev{margin-left:auto;transition:transform .15s;font-size:10px}
+    .sec-toggle.open .chev{transform:rotate(90deg)}
+    .sec-body{margin-top:12px}
+    .sec-body.collapsed{display:none}
+    footer{padding:12px 16px;border-top:1px solid var(--line);color:var(--muted);font-size:11px;line-height:1.6}
+    footer a{color:#7f8a9b}
+    .btn-lg{padding:11px 12px;font-size:13px;border-radius:9px}
+  </style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <header>
+      <span class="logo">📍 GeoPort</span>
+      <span id="onlineBadge" class="badge"><span class="dot"></span><span>…</span></span>
+    </header>
+    <div id="sudoWarn">{{ sudo_message }}</div>
+
+    <div class="scroll">
+      <!-- DEVICES -->
+      <section>
+        <h2>Your devices
+          <span class="right"><button id="refreshBtn" class="sm">↻ Refresh</button></span>
+        </h2>
+        <div id="deviceList"></div>
+        <div id="noDevices">
+          <p class="hint" style="margin:0 0 4px">No devices yet — let’s connect one:</p>
+          <ol class="steps">
+            <li>Plug in your iPhone or iPad with a USB cable</li>
+            <li>Unlock it and tap <b>Trust</b> if asked</li>
+            <li>Hit <b>Refresh</b> — it’ll show up here</li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- SET LOCATION -->
+      <section>
+        <h2>Set location</h2>
+        <div class="row">
+          <input id="searchInput" type="text" placeholder="Search a place or address…" />
+          <button id="searchBtn" class="sm">Find</button>
+        </div>
+        <div class="hint" style="margin:9px 0 6px">…or just click anywhere on the map. Fine-tune below:</div>
+        <div class="row">
+          <div class="grow">
+            <label class="fld">Latitude</label>
+            <input id="latInput" type="text" class="coords" value="40.4168" />
+          </div>
+          <div class="grow">
+            <label class="fld">Longitude</label>
+            <input id="lngInput" type="text" class="coords" value="-3.7038" />
+          </div>
+          <button id="gotoBtn" class="sm" title="Center the map on these coordinates" style="align-self:flex-end">Go</button>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <button id="setAllBtn" class="primary grow btn-lg">📡 Set all devices here</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="stopAllBtn" class="danger grow sm">Stop all devices</button>
+        </div>
+        <div class="hint" style="margin-top:10px">Each connected device gets its own coloured pin — drag a pin to move just that one.</div>
+      </section>
+
+      <!-- OFFLINE MAPS (collapsible / advanced) -->
+      <section>
+        <button class="sec-toggle" id="offlineToggle">🗺️ Offline maps &amp; basemap <span class="chev">▸</span></button>
+        <div id="offlinePanel" class="sec-body collapsed">
+          <label class="fld">Basemap style</label>
+          <select id="providerSelect"></select>
+
+          <label class="fld" style="margin-top:14px">Save the current map view for offline use</label>
+          <div class="row">
+            <span class="small muted">Detail</span>
+            <input id="minZoom" type="number" min="1" max="19" value="11" />
+            <span class="muted">→</span>
+            <input id="maxZoom" type="number" min="1" max="19" value="16" />
+          </div>
+          <div class="row" style="margin-top:8px">
+            <button id="estimateBtn" class="sm">Estimate size</button>
+            <button id="downloadBtn" class="primary sm grow">⬇ Download this area</button>
+          </div>
+          <div id="estimate" class="hint" style="margin-top:6px"></div>
+          <div class="progress" id="dlProgress"><i></i></div>
+          <div id="dlStatus" class="hint" style="margin-top:6px"></div>
+
+          <div class="row" style="margin-top:14px">
+            <div class="grow small muted" id="cacheInfo">Cache: …</div>
+            <button id="clearCacheBtn" class="sm danger">Clear</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <footer>
+      Simulates GPS on your own iOS devices — the same “Simulate Location” feature Xcode uses, for testing.<br>
+      <span style="opacity:.8">v{{ app_version_num }} · offline + multi-device · based on <a href="https://github.com/davesc63/GeoPort" target="_blank" rel="noopener">GeoPort</a> (GPL-3.0)</span>
+    </footer>
+  </div>
+  <div id="map"></div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="/static/vendor/leaflet/leaflet.js"></script>
+<script>
+/* ----------------------------------------------------------------------- */
+/* GeoPort front-end — offline tiles + multi-device                         */
+/* ----------------------------------------------------------------------- */
+L.Icon.Default.imagePath = "/static/vendor/leaflet/images/";
+
+const PIN_COLORS = ["#e6194B","#3cb44b","#4363d8","#f58231","#911eb4","#42d4f4","#f032e6","#bfef45","#fabed4","#469990"];
+const state = {
+  providers: [], provider: "osm",
+  tileLayer: null,
+  devices: {},        // udid -> {info, connType, ios, name, class}
+  sessions: {},       // udid -> server-side status dict
+  markers: {},        // udid -> L.marker
+  colorIdx: 0, colors: {},
+  online: true, fitted: false,
+};
+
+const map = L.map("map", {zoomControl:true, worldCopyJump:true}).setView([40.4168,-3.7038], 6);
+
+/* white draggable "broadcast target" reticle */
+const targetIcon = L.divIcon({className:"pin-marker", html:
+  `<svg width="34" height="34" viewBox="0 0 34 34"><circle cx="17" cy="17" r="10" fill="none" stroke="#fff" stroke-width="2"/><circle cx="17" cy="17" r="2.5" fill="#fff"/><line x1="17" y1="1" x2="17" y2="7" stroke="#fff" stroke-width="2"/><line x1="17" y1="27" x2="17" y2="33" stroke="#fff" stroke-width="2"/><line x1="1" y1="17" x2="7" y2="17" stroke="#fff" stroke-width="2"/><line x1="27" y1="17" x2="33" y2="17" stroke="#fff" stroke-width="2"/></svg>`,
+  iconSize:[34,34], iconAnchor:[17,17]});
+const targetMarker = L.marker(map.getCenter(), {icon:targetIcon, draggable:true, zIndexOffset:1000}).addTo(map);
+targetMarker.on("drag", () => syncInputs(targetMarker.getLatLng()));
+map.on("click", e => { targetMarker.setLatLng(e.latlng); syncInputs(e.latlng); });
+
+function pinIcon(color){
+  return L.divIcon({className:"pin-marker", html:
+    `<svg width="30" height="42" viewBox="0 0 30 42"><path d="M15 0C6.7 0 0 6.7 0 15c0 10.5 15 27 15 27s15-16.5 15-27C30 6.7 23.3 0 15 0z" fill="${color}"/><circle cx="15" cy="15" r="6" fill="#fff" opacity=".92"/></svg>`,
+    iconSize:[30,42], iconAnchor:[15,42], popupAnchor:[0,-38]});
+}
+function colorFor(udid){
+  if(!state.colors[udid]){ state.colors[udid] = PIN_COLORS[state.colorIdx % PIN_COLORS.length]; state.colorIdx++; }
+  return state.colors[udid];
+}
+
+/* ---- toast ---- */
+let toastT;
+function toast(msg, kind){
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = "toast show " + (kind||"");
+  clearTimeout(toastT); toastT = setTimeout(()=>t.className="toast",3200);
+}
+
+function syncInputs(latlng){
+  document.getElementById("latInput").value = latlng.lat.toFixed(6);
+  document.getElementById("lngInput").value = latlng.lng.toFixed(6);
+}
+function targetLatLng(){
+  const lat = parseFloat(document.getElementById("latInput").value);
+  const lng = parseFloat(document.getElementById("lngInput").value);
+  return (isFinite(lat)&&isFinite(lng)) ? {lat,lng} : null;
+}
+
+async function api(path, body){
+  const opt = body ? {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)} : {};
+  const r = await fetch(path, opt);
+  try { return await r.json(); } catch(e){ return {}; }
+}
+
+/* ---- tiles / providers ---- */
+async function loadProviders(){
+  const d = await api("/tile_providers");
+  state.providers = d.providers; state.provider = d.default;
+  const sel = document.getElementById("providerSelect");
+  sel.innerHTML = "";
+  d.providers.forEach(p => { const o=document.createElement("option"); o.value=p.key; o.textContent=p.name; sel.appendChild(o); });
+  sel.value = state.provider;
+  setProvider(state.provider);
+  sel.onchange = () => setProvider(sel.value);
+}
+function setProvider(key){
+  state.provider = key;
+  const meta = state.providers.find(p=>p.key===key) || {max_zoom:19, attribution:""};
+  if(state.tileLayer) map.removeLayer(state.tileLayer);
+  state.tileLayer = L.tileLayer(`/tiles/${key}/{z}/{x}/{y}.png`, {
+    maxZoom: meta.max_zoom, attribution: meta.attribution + " · cached locally by GeoPort"
+  }).addTo(map);
+  document.getElementById("maxZoom").max = meta.max_zoom;
+  document.getElementById("minZoom").max = meta.max_zoom;
+}
+
+/* ---- devices ---- */
+async function refreshDevices(){
+  const data = await api("/list_devices");
+  if(data.error){ toast("Device list error: "+data.error,"err"); return; }
+  const seen = new Set();
+  Object.keys(data).forEach(udid => {
+    const conns = data[udid];
+    const transports = Object.keys(conns);            // USB and/or Wifi, as macOS sees it
+    const info = (conns["USB"] || conns[transports[0]])[0];
+    const prev = state.devices[udid];
+    const selected = (prev && transports.includes(prev.selected)) ? prev.selected
+                     : (transports.includes("USB") ? "USB" : transports[0]);
+    state.devices[udid] = {
+      info, name: info.DeviceName || udid, class: info.DeviceClass || "iDevice",
+      ios: info.ProductVersion, transports, selected
+    };
+    seen.add(udid);
+  });
+  Object.keys(state.devices).forEach(u => { if(!seen.has(u) && !state.sessions[u]) delete state.devices[u]; });
+  renderDevices();
+}
+
+function renderDevices(){
+  const list = document.getElementById("deviceList");
+  const udids = Object.keys(state.devices);
+  document.getElementById("noDevices").style.display = udids.length ? "none":"block";
+  list.innerHTML = "";
+  udids.forEach(udid => {
+    const d = state.devices[udid];
+    const s = state.sessions[udid];
+    const connected = s && s.connected;
+    const status = s ? s.status : "idle";
+    const color = colorFor(udid);
+    const lockTransport = connected || status==="connecting";
+    const transHtml = (d.transports||["USB"]).map(t => {
+      const cls = t==="USB" ? "usb" : "wifi";
+      const label = t==="USB" ? "USB" : "Wi-Fi";
+      const active = t===d.selected;
+      return `<span class="chip ${cls} transport ${active?'active':''} ${lockTransport?'locked':''}" data-t="${t}">${label}</span>`;
+    }).join(" ");
+    const el = document.createElement("div");
+    el.className = "device";
+    el.innerHTML = `
+      <div class="top">
+        <span class="pin" style="background:${connected?color:'#3a4250'}"></span>
+        <div class="grow">
+          <div class="name">${escapeHtml(d.name)}</div>
+          <div class="meta">${escapeHtml(d.class)} · iOS ${escapeHtml(d.ios||"?")} ${transHtml}</div>
+        </div>
+      </div>
+      <div class="status"><span class="s-${status}">${statusLabel(status, s)}</span></div>
+      <div class="actions"></div>`;
+    if(!lockTransport){
+      el.querySelectorAll(".transport").forEach(chip => chip.onclick = () => {
+        state.devices[udid].selected = chip.dataset.t; renderDevices();
+      });
+    }
+    const actions = el.querySelector(".actions");
+    if(!connected){
+      const b = mkBtn(status==="connecting"?"Connecting…":"Connect","primary sm",()=>connectDevice(udid));
+      if(status==="connecting") b.disabled = true;
+      actions.appendChild(b);
+    } else {
+      actions.appendChild(mkBtn("Set here","sm",()=>setDevice(udid)));
+      actions.appendChild(mkBtn("Stop","sm danger",()=>stopDevice(udid)));
+      actions.appendChild(mkBtn("Disconnect","sm",()=>disconnectDevice(udid)));
+    }
+    list.appendChild(el);
+  });
+}
+function statusLabel(status, s){
+  if(status==="error") return "⚠ " + (s.lastError||"error");
+  if(status==="locating" && s && s.location) return `📍 simulating ${s.location.lat.toFixed(4)}, ${s.location.lng.toFixed(4)}`;
+  return ({idle:"Not connected",connecting:"Connecting…",connected:"Connected — ready"})[status] || status;
+}
+function mkBtn(label,cls,fn){ const b=document.createElement("button"); b.className=cls; b.textContent=label; b.onclick=fn; return b; }
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function connectDevice(udid){
+  const d = state.devices[udid];
+  const connType = d.selected === "USB" ? "USB" : "Network";
+  state.sessions[udid] = {status:"connecting", connected:false};
+  renderDevices();
+  toast(`Connecting ${d.name} over ${d.selected==="USB"?"USB":"Wi-Fi"}…`);
+  const res = await api("/connect_device", {
+    udid, connType, ios_version:d.ios, deviceName:d.name, deviceClass:d.class
+  });
+  if(res.developer_mode_required){
+    state.sessions[udid] = {status:"idle", connected:false};
+    renderDevices();
+    if(confirm(`${d.name} needs Developer Mode.\n\nEnable it now? The device must be unlocked (and for first-time setup may need its passcode temporarily removed). It will then prompt you in Settings → Privacy & Security → Developer Mode and reboot. After that, press Connect again.`)){
+      const r2 = await api("/enable_developer_mode", {udid, connType, ios_version:d.ios, deviceName:d.name, deviceClass:d.class});
+      if(r2.error) toast("Developer Mode: "+r2.error,"err");
+      else toast("Enable Developer Mode on the device, then Connect again.","ok");
+    }
+    return;
+  }
+  state.sessions[udid] = res.device || {status:"error", connected:false, lastError:res.error};
+  renderDevices();
+  if(res.connected){
+    addOrMoveMarker(udid);
+    toast(`${d.name} connected`,"ok");
+  } else {
+    toast(`${d.name}: ${res.error||"connect failed"}`,"err");
+  }
+}
+
+function addOrMoveMarker(udid, latlng){
+  const color = colorFor(udid);
+  let m = state.markers[udid];
+  const at = latlng || targetMarker.getLatLng();
+  if(!m){
+    m = L.marker(at, {icon:pinIcon(color), draggable:true, zIndexOffset:500}).addTo(map);
+    m.bindTooltip(state.devices[udid] ? state.devices[udid].name : udid, {direction:"top", offset:[0,-38]});
+    m.on("dragend", () => setDevice(udid, m.getLatLng()));
+    state.markers[udid] = m;
+  } else if(latlng){
+    m.setLatLng(latlng);
+  }
+}
+
+async function setDevice(udid, latlng){
+  // latlng passed = the user dragged this device's own pin.
+  // Otherwise ("Set here" button) use the shared target — i.e. wherever you
+  // last clicked on the map / typed in the Lat-Lng boxes.
+  const ll = latlng || targetLatLng() || (state.markers[udid] && state.markers[udid].getLatLng());
+  if(!ll){ toast("Click a spot on the map first","err"); return; }
+  if(state.markers[udid]) state.markers[udid].setLatLng(ll);   // move this device's pin to the target
+  const res = await api("/set_location", {udid, lat:ll.lat, lng:ll.lng});
+  if(res.error) toast("Set: "+res.error,"err"); else toast(`${state.devices[udid].name} → ${ll.lat.toFixed(4)}, ${ll.lng.toFixed(4)}`,"ok");
+  pollStatus();
+}
+async function stopDevice(udid){
+  const res = await api("/stop_location",{udid});
+  if(res.error) toast("Stop: "+res.error,"err"); else toast(`${state.devices[udid].name} stopped`,"ok");
+  pollStatus();
+}
+async function disconnectDevice(udid){
+  await api("/disconnect_device",{udid});
+  if(state.markers[udid]){ map.removeLayer(state.markers[udid]); delete state.markers[udid]; }
+  delete state.sessions[udid];
+  toast("Disconnected");
+  pollStatus(); refreshDevices();
+}
+
+async function setAll(){
+  const ll = targetLatLng() || targetMarker.getLatLng();
+  const connected = Object.keys(state.sessions).filter(u=>state.sessions[u]&&state.sessions[u].connected);
+  if(!connected.length){ toast("No connected devices","err"); return; }
+  connected.forEach(u => { if(state.markers[u]) state.markers[u].setLatLng(ll); });
+  await api("/set_all_locations",{lat:ll.lat,lng:ll.lng});
+  toast(`Set ${connected.length} device(s) → ${ll.lat.toFixed(4)}, ${ll.lng.toFixed(4)}`,"ok");
+  pollStatus();
+}
+async function stopAll(){
+  await api("/stop_all_locations",{});
+  toast("Stopped all devices");
+  pollStatus();
+}
+
+async function pollStatus(){
+  const d = await api("/device_status");
+  let created = false;
+  (d.devices||[]).forEach(dev => {
+    state.sessions[dev.udid] = dev;
+    // Restore a map pin for any connected device that doesn't have one yet
+    // (e.g. after a page reload), placing it at its current simulated location.
+    if(dev.connected && state.devices[dev.udid] && !state.markers[dev.udid]){
+      addOrMoveMarker(dev.udid, dev.location ? {lat:dev.location.lat, lng:dev.location.lng} : null);
+      created = true;
+    }
+  });
+  // On first load, bring the map to wherever the connected devices actually are
+  // so their pins are visible (otherwise a device set far away is off-screen).
+  if(created && !state.fitted){
+    const located = (d.devices||[]).filter(x => x.location && state.markers[x.udid])
+                                   .map(x => state.markers[x.udid]);
+    if(located.length === 1){ map.setView(located[0].getLatLng(), Math.max(map.getZoom(), 11)); state.fitted = true; }
+    else if(located.length > 1){ map.fitBounds(L.featureGroup(located).getBounds().pad(0.3)); state.fitted = true; }
+  }
+  renderDevices();
+}
+
+/* ---- offline status / cache ---- */
+function fmtBytes(b){ if(b<1024) return b+" B"; if(b<1048576) return (b/1024).toFixed(0)+" KB"; if(b<1073741824) return (b/1048576).toFixed(1)+" MB"; return (b/1073741824).toFixed(2)+" GB"; }
+async function refreshOffline(){
+  const d = await api("/offline_status");
+  state.online = d.online;
+  const badge = document.getElementById("onlineBadge");
+  badge.querySelector(".dot").className = "dot " + (d.online?"on":"off");
+  badge.querySelector("span:last-child").textContent = d.online ? "Online" : "Offline";
+  document.getElementById("cacheInfo").textContent = `Cache: ${d.cache_tiles} tiles · ${fmtBytes(d.cache_bytes)}`;
+}
+
+async function estimateArea(){
+  const b = map.getBounds();
+  const body = {provider:state.provider, north:b.getNorth(),south:b.getSouth(),east:b.getEast(),west:b.getWest(),
+                min_zoom:+document.getElementById("minZoom").value, max_zoom:+document.getElementById("maxZoom").value};
+  const r = await api("/estimate_area", body);
+  if(r.error){ document.getElementById("estimate").textContent = r.error; return null; }
+  const txt = `${r.tiles.toLocaleString()} tiles` + (r.too_large?` — too large (max ${r.max_tiles.toLocaleString()})`:"");
+  document.getElementById("estimate").textContent = txt;
+  return r;
+}
+async function downloadArea(){
+  const est = await estimateArea(); if(est && est.too_large){ toast("Area too large — zoom in or lower max zoom","err"); return; }
+  const b = map.getBounds();
+  const body = {provider:state.provider, north:b.getNorth(),south:b.getSouth(),east:b.getEast(),west:b.getWest(),
+                min_zoom:+document.getElementById("minZoom").value, max_zoom:+document.getElementById("maxZoom").value};
+  const r = await api("/download_area", body);
+  if(r.error){ toast(r.error,"err"); return; }
+  toast(`Downloading ${r.tiles.toLocaleString()} tiles…`);
+  document.getElementById("dlProgress").style.display="block";
+  pollDownload();
+}
+async function pollDownload(){
+  const s = await api("/download_status");
+  const pct = s.total ? Math.round(100*s.done/s.total) : 0;
+  document.querySelector("#dlProgress > i").style.width = pct+"%";
+  document.getElementById("dlStatus").textContent =
+    `${s.done}/${s.total} · ${s.fetched} new, ${s.cached} cached, ${s.errors} failed`;
+  if(s.active){ setTimeout(pollDownload, 600); }
+  else {
+    document.getElementById("dlStatus").textContent += ` — ${s.message}`;
+    refreshOffline();
+    setTimeout(()=>{document.getElementById("dlProgress").style.display="none";}, 1500);
+  }
+}
+
+async function search(){
+  const q = document.getElementById("searchInput").value.trim();
+  if(!q) return;
+  if(!state.online){ toast("Search needs internet","err"); return; }
+  try{
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`,{headers:{"Accept-Language":"en"}});
+    const j = await r.json();
+    if(!j.length){ toast("No result","err"); return; }
+    const ll = {lat:+j[0].lat, lng:+j[0].lon};
+    map.setView(ll, 14); targetMarker.setLatLng(ll); syncInputs(ll);
+  }catch(e){ toast("Search failed","err"); }
+}
+
+/* ---- wire up ---- */
+document.getElementById("offlineToggle").onclick = (e) => {
+  e.currentTarget.classList.toggle("open");
+  document.getElementById("offlinePanel").classList.toggle("collapsed");
+};
+document.getElementById("refreshBtn").onclick = refreshDevices;
+document.getElementById("setAllBtn").onclick = setAll;
+document.getElementById("stopAllBtn").onclick = stopAll;
+document.getElementById("gotoBtn").onclick = () => { const ll=targetLatLng(); if(ll){ map.setView(ll,Math.max(map.getZoom(),12)); targetMarker.setLatLng(ll);} };
+document.getElementById("estimateBtn").onclick = estimateArea;
+document.getElementById("downloadBtn").onclick = downloadArea;
+document.getElementById("clearCacheBtn").onclick = async () => { if(confirm("Clear all cached map tiles?")){ const r=await api("/clear_cache",{}); toast(`Cleared ${r.cleared} tiles`); refreshOffline(); } };
+document.getElementById("searchBtn").onclick = search;
+document.getElementById("searchInput").addEventListener("keydown", e=>{ if(e.key==="Enter") search(); });
+
+if("{{ sudo_message }}".trim()) document.getElementById("sudoWarn").style.display="block";
+
+(async function init(){
+  await loadProviders();
+  await refreshOffline();
+  await refreshDevices();
+  await pollStatus();
+  setInterval(refreshOffline, 8000);
+  setInterval(pollStatus, 4000);
+})();
+</script>
+</body>
+</html>
