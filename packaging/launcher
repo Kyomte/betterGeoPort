@@ -1,24 +1,37 @@
 #!/bin/bash
-# GeoPort .app launcher.
-# iOS 17+ location tunnels need root, so elevate via the standard macOS admin
-# prompt, start the bundled server, then open the browser as the normal user.
+# betterGeoPort .app launcher.
+#
+# iOS 17+ location tunnels need root. We elevate via the standard macOS admin
+# prompt and run the bundled server in the FOREGROUND of that prompt — a
+# backgrounded (nohup &) process gets killed when the privileged helper exits,
+# so foreground is what keeps it alive. This launcher blocks while the server
+# runs, which keeps the app "open" in the Dock; quitting the app stops it.
+# The browser is opened (as the normal user) once the server is reachable.
 
 BUNDLE="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$BUNDLE/Resources/GeoPort/GeoPort"
 PORT=54321
 URL="http://localhost:$PORT/"
 
-already_up() { /usr/bin/curl -s -o /dev/null -m 1 "$URL"; }
+up() { /usr/bin/curl -s -o /dev/null -m 1 "$URL"; }
 
-if ! already_up; then
-  # Start the server as root (one password prompt), detached so it keeps running.
-  /usr/bin/osascript -e "do shell script \"nohup '$BIN' --no-browser --port $PORT > /tmp/geoport.log 2>&1 &\" with administrator privileges" || exit 1
+# Already running? Just focus the UI.
+if up; then
+  /usr/bin/open "$URL"
+  exit 0
 fi
 
-# Wait for it to come up, then open the UI.
-for i in $(seq 1 45); do
-  if already_up; then /usr/bin/open "$URL"; exit 0; fi
-  sleep 1
-done
+# Open the browser once the server answers (first boot unpacks deps, ~20s).
+(
+  for _ in $(seq 1 150); do
+    if up; then /usr/bin/open "$URL"; exit 0; fi
+    sleep 1
+  done
+  /usr/bin/open "$URL"   # open anyway after the wait so the user can refresh
+) &
 
-/usr/bin/open "$URL"
+# Run the server as root in the foreground (one password prompt). Blocks here
+# for the life of the server. Output goes to /tmp/geoport.log for debugging.
+exec /usr/bin/osascript <<APPLESCRIPT
+do shell script "'${BIN}' --no-browser --port ${PORT} > /tmp/geoport.log 2>&1" with administrator privileges
+APPLESCRIPT
