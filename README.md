@@ -80,7 +80,7 @@ Then:
 
 1. **On the device:** enable Developer Mode (*Settings → Privacy & Security →
    Developer Mode*), connect it by USB, unlock it, and tap **Trust**.
-2. **In GeoPort:** press **Refresh** → your device appears under *Your devices*.
+2. **In betterGeoPort:** press **Refresh** → your device appears under *Your devices*.
    Pick **USB** or **Wi-Fi**, then **Connect**.
 3. **Set a location:** click anywhere on the map (or search an address / type
    coordinates), then **Set here** on the device. Its blue dot in Apple Maps

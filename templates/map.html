@@ -179,7 +179,7 @@
 <script src="/static/vendor/leaflet/leaflet.js"></script>
 <script>
 /* ----------------------------------------------------------------------- */
-/* GeoPort front-end — offline tiles + multi-device                         */
+/* betterGeoPort front-end — offline tiles + multi-device                   */
 /* ----------------------------------------------------------------------- */
 L.Icon.Default.imagePath = "/static/vendor/leaflet/images/";
 
@@ -254,7 +254,7 @@ function setProvider(key){
   const meta = state.providers.find(p=>p.key===key) || {max_zoom:19, attribution:""};
   if(state.tileLayer) map.removeLayer(state.tileLayer);
   state.tileLayer = L.tileLayer(`/tiles/${key}/{z}/{x}/{y}.png`, {
-    maxZoom: meta.max_zoom, attribution: meta.attribution + " · cached locally by GeoPort"
+    maxZoom: meta.max_zoom, attribution: meta.attribution + " · cached locally by betterGeoPort"
   }).addTo(map);
   document.getElementById("maxZoom").max = meta.max_zoom;
   document.getElementById("minZoom").max = meta.max_zoom;
