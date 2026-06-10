@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>GeoPort</string>
+    <string>betterGeoPort</string>
     <key>CFBundleDisplayName</key>
-    <string>GeoPort</string>
+    <string>betterGeoPort</string>
     <key>CFBundleIdentifier</key>
-    <string>me.kio.geoport</string>
+    <string>me.kio.bettergeoport</string>
     <key>CFBundleExecutable</key>
     <string>launcher</string>
     <key>CFBundleIconFile</key>

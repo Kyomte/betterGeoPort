@@ -1,10 +1,10 @@
-# GeoPort — offline + multi-device
+# betterGeoPort
 
 An **iOS location simulator**: set a simulated GPS location on your own iPhone or
 iPad straight from a map — the same "Simulate Location" mechanism Xcode uses, for
 app testing and development.
 
-This is a rebuild of [**GeoPort** by davesc63](https://github.com/davesc63/GeoPort)
+**betterGeoPort** is a rebuild of [**GeoPort** by davesc63](https://github.com/davesc63/GeoPort)
 (GPL-3.0) focused on three things:
 
 - 🗺️ **Offline maps** — map tiles are served from a local cache, so the map works
@@ -15,7 +15,7 @@ This is a rebuild of [**GeoPort** by davesc63](https://github.com/davesc63/GeoPo
 - 🔒 **Privacy / offline-first** — no analytics or telemetry, binds to `127.0.0.1`
   only, validates the `Host` header, and never blocks startup on the network.
 
-![GeoPort screenshot](docs/screenshot.png)
+![betterGeoPort screenshot](docs/screenshot.png)
 
 > ⚠️ Use this only on **your own devices**, for legitimate testing. It relies on
 > Apple's developer "Simulate Location" feature and requires the device to be
@@ -25,7 +25,7 @@ This is a rebuild of [**GeoPort** by davesc63](https://github.com/davesc63/GeoPo
 
 ## Install
 
-GeoPort talks to iOS devices via [`pymobiledevice3`](https://github.com/doronz88/pymobiledevice3)
+betterGeoPort talks to iOS devices via [`pymobiledevice3`](https://github.com/doronz88/pymobiledevice3)
 and needs to compile one native module, so the simplest path is to build from
 source. macOS only.
 
@@ -42,8 +42,8 @@ brew install openssl@3
 ### 2. Set up
 
 ```bash
-git clone https://github.com/<you>/GeoPort-offline.git
-cd GeoPort-offline
+git clone https://github.com/Kyomte/betterGeoPort.git
+cd betterGeoPort
 
 python3 -m venv .venv && source .venv/bin/activate
 
@@ -59,7 +59,7 @@ pip install -r requirements.txt
 
 ```bash
 pip install pyinstaller
-./packaging/build_app.sh        # produces ./GeoPort.app (ad-hoc signed)
+./packaging/build_app.sh        # produces ./betterGeoPort.app (ad-hoc signed)
 ```
 
 ---
@@ -73,7 +73,7 @@ sudo ./run --no-browser --port 54321
 # then open http://localhost:54321
 ```
 
-…or just launch **`GeoPort.app`** (it prompts for your admin password and opens
+…or just launch **`betterGeoPort.app`** (it prompts for your admin password and opens
 the browser for you).
 
 Then:
