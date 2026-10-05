@@ -13,6 +13,7 @@ on-device behaviour matches; they are simply made instance-based and
 thread-safe instead of global.
 """
 
+import sys
 import time
 import asyncio
 import logging
@@ -35,11 +36,20 @@ from pymobiledevice3.remote.tunnel_service import (
 
 logger = logging.getLogger("GeoPort")
 
-# Discovering RSD services and toggling macOS `remoted` must not happen from two
-# devices at once, or the tunnels race.  Serialise *setup*; tunnels then run in
-# parallel once established.
+# Discovering RSD services, toggling macOS `remoted` (a no-op elsewhere) and
+# creating the TUN adapter (utun on macOS, Wintun on Windows) must not happen
+# from two devices at once, or the tunnels race.  Serialise *setup*; tunnels
+# then run in parallel once established.
 _SETUP_LOCK = threading.Lock()
 BONJOUR_TIMEOUT = 5
+
+
+def _windows_admin():
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:                                   # noqa: BLE001
+        return False
 
 
 def is_ios_17_plus(version_string):
@@ -63,21 +73,31 @@ def is_legacy_quic(version_string):
     return (17, 0) <= _ver2(version_string) <= (17, 3)
 
 
+if sys.platform == "win32":
+    _WIFI_UNAVAILABLE = (
+        "This device isn't available over Wi-Fi yet. Connect it once by USB, turn on "
+        "Wi-Fi sync for it in the Apple Devices app (or \"Sync with this device over "
+        "Wi-Fi\" in iTunes), and keep it awake on the same network — or use USB.")
+else:
+    _WIFI_UNAVAILABLE = (
+        "This device isn't available over Wi-Fi yet. macOS registers a "
+        "device for Wi-Fi automatically once it stays connected to the "
+        "same network (that's why the iPhone works). Keep it awake on "
+        "Wi-Fi, or use USB.")
+
+
 def device_lockdown(udid, connection_type, discover=False):
     """Return a lockdown for the device over the requested transport.
-    Wi-Fi (Network) requires macOS to have promoted the device to a usbmux
-    'Network' connection — the CoreDevice tunnel only works over that, not over
-    a raw TCP lockdown. Raises a friendly error if the device isn't on Wi-Fi."""
+    Wi-Fi (Network) requires the OS usbmux (macOS usbmuxd / Windows Apple Mobile
+    Device Service) to have promoted the device to a 'Network' connection — the
+    CoreDevice tunnel only works over that, not over a raw TCP lockdown. Raises
+    a friendly error if the device isn't on Wi-Fi."""
     conn = "Network" if connection_type in ("Network", "Manual") else "USB"
     try:
         return create_using_usbmux(udid, connection_type=conn, autopair=True)
     except Exception:                                   # noqa: BLE001
         if conn == "Network":
-            raise RuntimeError(
-                "This device isn't available over Wi-Fi yet. macOS registers a "
-                "device for Wi-Fi automatically once it stays connected to the "
-                "same network (that's why the iPhone works). Keep it awake on "
-                "Wi-Fi, or use USB.")
+            raise RuntimeError(_WIFI_UNAVAILABLE)
         raise
 
 
@@ -172,6 +192,10 @@ class DeviceSession:
         except Exception as exc:                        # noqa: BLE001
             import traceback
             self._tunnel_error = f"{exc.__class__.__name__}: {exc}".strip()
+            if sys.platform == "win32" and not _windows_admin():
+                # Creating the Wintun adapter is what fails without elevation.
+                self._tunnel_error += (" — iOS 17+ tunnels need Administrator rights; "
+                                       "restart betterGeoPort and accept the UAC prompt.")
             self.status = "error"
             self.last_error = self._tunnel_error
             logger.error(f"[{self.name}] tunnel error: {self._tunnel_error}")

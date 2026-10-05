@@ -25,12 +25,14 @@ modest and zoom ranges sensible.
 """
 
 import os
+import json
 import math
 import time
 import zlib
 import struct
 import socket
 import threading
+from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -42,6 +44,8 @@ from flask import Blueprint, jsonify, request, Response, send_file
 
 HOME_DIR = os.path.expanduser("~")
 CACHE_ROOT = os.path.join(HOME_DIR, "GeoPort", "tiles")
+# User settings, e.g. {"carto_api_key": "..."}; kept out of the repo.
+CONFIG_PATH = os.path.join(HOME_DIR, "GeoPort", "config.json")
 
 USER_AGENT = "GeoPort-Offline/1.0 (+https://github.com/davesc63/GeoPort)"
 FETCH_TIMEOUT = 6          # seconds for a single live tile fetch
@@ -51,8 +55,13 @@ MAX_AREA_TILES = 250_000   # refuse runaway area downloads above this
 # Tile providers we are willing to proxy. {s} = subdomain, substituted from
 # `subdomains`. Note Esri uses z/y/x order, handled by the template itself.
 #
-# Order matters — it drives the basemap dropdown. The default providers are
-# key-free sources that permit light/app usage (Carto, Esri). OpenStreetMap's
+# A provider with "api_key" names a setting (CONFIG_PATH key, or the same name
+# upper-cased as an environment variable) that is appended as ?key=… upstream.
+# Carto basemaps show an "API key required" watermark without one; get a free
+# key at https://carto.com/basemaps/apikey.
+#
+# Order matters — it drives the basemap dropdown. The providers permit light/app
+# usage (Carto with a free key, Esri and OpenTopoMap without). OpenStreetMap's
 # OWN tile servers (tile.openstreetmap.org) actively block proxy/app access
 # ("Access blocked" tiles), so they are intentionally NOT offered here; use
 # Carto, which is rendered from the same OpenStreetMap data.
@@ -63,6 +72,7 @@ PROVIDERS = {
         "subdomains": ["a", "b", "c", "d"],
         "max_zoom": 20,
         "attribution": '&copy; OpenStreetMap contributors &copy; CARTO',
+        "api_key": "carto_api_key",
     },
     "carto_light": {
         "name": "Light (Carto Positron)",
@@ -70,6 +80,7 @@ PROVIDERS = {
         "subdomains": ["a", "b", "c", "d"],
         "max_zoom": 20,
         "attribution": '&copy; OpenStreetMap contributors &copy; CARTO',
+        "api_key": "carto_api_key",
     },
     "carto_dark": {
         "name": "Dark (Carto Dark Matter)",
@@ -77,6 +88,7 @@ PROVIDERS = {
         "subdomains": ["a", "b", "c", "d"],
         "max_zoom": 20,
         "attribution": '&copy; OpenStreetMap contributors &copy; CARTO',
+        "api_key": "carto_api_key",
     },
     "esri_sat": {
         "name": "Satellite (Esri)",
@@ -163,12 +175,29 @@ def _tile_path(provider, z, x, y):
     return os.path.join(CACHE_ROOT, provider, str(z), str(x), f"{y}.png")
 
 
+def _api_key(setting):
+    """A provider key from the environment (upper-cased name) or CONFIG_PATH.
+    Read on every upstream fetch so a key added while running takes effect."""
+    key = os.environ.get(setting.upper(), "").strip()
+    if key:
+        return key
+    try:
+        with open(CONFIG_PATH, encoding="utf-8-sig") as fh:
+            return str(json.load(fh).get(setting) or "").strip()
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
 def _upstream_url(provider, z, x, y):
     meta = PROVIDERS[provider]
     url = meta["url"].replace("{z}", str(z)).replace("{x}", str(x)).replace("{y}", str(y))
     subs = meta.get("subdomains") or []
     if "{s}" in url and subs:
         url = url.replace("{s}", subs[(x + y) % len(subs)])
+    if meta.get("api_key"):
+        key = _api_key(meta["api_key"])
+        if key:
+            url += "?key=" + quote(key, safe="")
     return url
 
 
@@ -176,11 +205,21 @@ _session = requests.Session()
 _session.headers.update({"User-Agent": USER_AGENT})
 
 
+def _missing_key(provider):
+    """True if the provider needs an API key and none is configured."""
+    setting = PROVIDERS[provider].get("api_key")
+    return bool(setting) and not _api_key(setting)
+
+
 def _fetch_tile(provider, z, x, y):
     """Fetch a tile from upstream and write it to the cache. Returns bytes or None."""
     try:
         resp = _session.get(_upstream_url(provider, z, x, y), timeout=FETCH_TIMEOUT)
         if resp.status_code == 200 and resp.content:
+            if _missing_key(provider):
+                # Keyless responses are "API key required" watermarks: show
+                # them live but never cache them as real tiles.
+                return resp.content
             path = _tile_path(provider, z, x, y)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp = f"{path}.{os.getpid()}.tmp"
@@ -352,6 +391,10 @@ def download_area():
     provider = d.get("provider", DEFAULT_PROVIDER)
     if provider not in PROVIDERS:
         return jsonify({"error": "Unknown provider"}), 400
+    if _missing_key(provider):
+        return jsonify({"error": f"{PROVIDERS[provider]['name']} needs a free API key "
+                                 f"(carto.com/basemaps/apikey) in {CONFIG_PATH} — "
+                                 f"or pick another basemap."}), 400
     try:
         bounds = {k: float(d[k]) for k in ("north", "south", "east", "west")}
         min_zoom = int(d["min_zoom"])

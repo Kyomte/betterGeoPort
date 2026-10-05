@@ -15,3 +15,6 @@ dist/
 # Local helpers not meant for the repo
 verify_ui.py          # needs Playwright + Chrome
 templates_backup/     # snapshot of the original UI
+
+# Windows release archive (built by packaging/build_windows.ps1)
+*.zip

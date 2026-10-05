@@ -9,12 +9,14 @@ This rebuild:
     location, plus a "Set all" broadcast (see device_manager.py),
   * removes the api.geoport.me telemetry phone-home,
   * starts instantly with no internet (version/fuel lookups are best-effort
-    in the background), and binds to localhost only.
+    in the background), and binds to localhost only,
+  * runs on macOS (sudo) and Windows (UAC / Administrator).
 """
 
 import os
 import sys
 import time
+import ctypes
 import socket
 import signal
 import locale
@@ -22,6 +24,7 @@ import random
 import logging
 import argparse
 import threading
+import subprocess
 import webbrowser
 
 import requests
@@ -44,6 +47,8 @@ parser.add_argument('--port', type=int, help='Port to listen on')
 parser.add_argument('--wifihost', type=str, help='WiFi IP address to connect to')
 parser.add_argument('--udid', type=str, help='Device UDID to target')
 parser.add_argument('--host', type=str, default='127.0.0.1', help='Interface to bind (default localhost)')
+parser.add_argument('--no-elevate', action='store_true',
+                    help='Windows: do not relaunch as Administrator via UAC')
 args = parser.parse_args()
 
 _log_dir = os.path.join(os.path.expanduser("~"), "GeoPort")
@@ -51,7 +56,8 @@ os.makedirs(_log_dir, exist_ok=True)
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s",
                     handlers=[logging.StreamHandler(),
-                              logging.FileHandler(os.path.join(_log_dir, "geoport.log"))])
+                              logging.FileHandler(os.path.join(_log_dir, "geoport.log"),
+                                                  encoding="utf-8")])
 logger = logging.getLogger("GeoPort")
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").disabled = True
@@ -62,7 +68,7 @@ app.register_blueprint(tiles_bp)
 manager = DeviceManager()
 pending = {}                      # udid -> (lat, lng) staged by /update_location
 
-# This server controls real devices and runs as root, so reject any request
+# This server controls real devices and runs as root/Administrator, so reject any request
 # whose Host header isn't local. That blocks DNS-rebinding attacks where a
 # malicious website resolves its name to 127.0.0.1 to reach this server.
 _ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -90,12 +96,43 @@ chosen_port = 54321
 app_meta = {"version_message": None, "broadcast": "", "fuel": None, "user_locale": None}
 
 
-def _is_root():
+def _is_admin():
+    """root on macOS/Linux, an elevated (UAC) token on Windows."""
+    if is_windows:
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:                               # noqa: BLE001
+            return False
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-sudo_message = "" if (is_windows or _is_root()) else \
-    "Not running as root — connecting iOS 17+ devices needs sudo."
+# On Windows, usbmux is provided by Apple Mobile Device Service (installed with
+# the "Apple Devices" app or iTunes), which listens on this local port.
+AMDS_ADDRESS = ("127.0.0.1", 27015)
+AMDS_MISSING = ("Apple Mobile Device Service not found — install the Apple Devices "
+                "app (Microsoft Store) or iTunes, then press Refresh.")
+
+
+def _amds_running():
+    try:
+        with socket.create_connection(AMDS_ADDRESS, timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def setup_notices():
+    """Things the user must fix before devices will work (shown as a banner)."""
+    notices = []
+    if is_windows:
+        if not _is_admin():
+            notices.append("Not running as Administrator — connecting iOS 17+ devices needs "
+                           "admin rights. Restart betterGeoPort and accept the UAC prompt.")
+        if not _amds_running():
+            notices.append(AMDS_MISSING)
+    elif not _is_admin():
+        notices.append("Not running as root — connecting iOS 17+ devices needs sudo.")
+    return " ".join(notices)
 
 # --------------------------------------------------------------------------- #
 # Best-effort background metadata (never blocks the UI)
@@ -172,6 +209,8 @@ def list_devices_route():
         return jsonify(connected)
     except Exception as exc:                            # noqa: BLE001
         logger.error(f"list_devices error: {exc}")
+        if is_windows and not _amds_running():
+            return jsonify({'error': AMDS_MISSING})
         return jsonify({'error': str(exc)})
 
 
@@ -361,7 +400,7 @@ def index():
         app_version_type=APP_VERSION_TYPE,
         error_message=None,
         current_platform=current_platform,
-        sudo_message=sudo_message,
+        setup_message=setup_notices(),
     )
 
 
@@ -373,7 +412,7 @@ def favicon():
 @app.route('/app_meta')
 def app_meta_route():
     return jsonify({**app_meta, "online": is_online(),
-                    "app_version": APP_VERSION_NUMBER, "sudo_message": sudo_message})
+                    "app_version": APP_VERSION_NUMBER, "setup_message": setup_notices()})
 
 
 @app.route('/exit', methods=['POST'])
@@ -386,12 +425,14 @@ def exit_app():
 def _shutdown():
     manager.shutdown()
     time.sleep(0.5)
-    os.kill(os.getpid(), signal.SIGINT)
+    if not is_windows:              # on Windows os.kill() is TerminateProcess
+        os.kill(os.getpid(), signal.SIGINT)
     os._exit(0)
 
 
 def is_port_in_use(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)           # Windows retries refused localhost connects for ~2s
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
@@ -406,29 +447,44 @@ def choose_port():
 
 def open_browser():
     time.sleep(1.5)
+    url = f'http://localhost:{chosen_port}'
     try:
-        webbrowser.get().open(f'http://localhost:{chosen_port}')
+        if is_windows:
+            # We are usually elevated here; going through explorer.exe hands the
+            # URL to the user's (unelevated) shell so the browser isn't run as admin.
+            subprocess.Popen(["explorer.exe", url])
+        else:
+            webbrowser.get().open(url)
     except Exception:                                   # noqa: BLE001
         pass
 
 
+def relaunch_as_admin():
+    """Windows: re-run this program elevated via the UAC prompt.
+    Returns True if the elevated copy was started (this one should exit)."""
+    if getattr(sys, "frozen", False):
+        params = subprocess.list2cmdline(sys.argv[1:])
+    else:
+        params = subprocess.list2cmdline([os.path.abspath(sys.argv[0])] + sys.argv[1:])
+    rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, os.getcwd(), 1)
+    return rc > 32                  # <= 32 is an error, e.g. the user declined UAC
+
+
 if __name__ == '__main__':
     if is_windows:
+        if not _is_admin() and not args.no_elevate:
+            if relaunch_as_admin():
+                sys.exit(0)
+            logger.warning("UAC elevation declined — continuing without Administrator rights.")
         try:
-            import pyi_splash
-            pyi_splash.close()
-        except Exception:
-            pass
-        try:
-            import pyuac
-            if not pyuac.isUserAdmin():
-                pyuac.runAsAdmin()
-        except Exception:
+            ctypes.windll.kernel32.SetConsoleTitleW("betterGeoPort — close this window to quit")
+        except Exception:                               # noqa: BLE001
             pass
 
-    if not _is_root() and not is_windows:
+    notice = setup_notices()
+    if notice:
         logger.warning("*" * 60)
-        logger.warning(sudo_message)
+        logger.warning(notice)
         logger.warning("*" * 60)
 
     threading.Thread(target=refresh_app_meta, daemon=True).start()

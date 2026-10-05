@@ -1,0 +1,6 @@
+# Keep shell scripts LF and Windows scripts CRLF regardless of checkout OS.
+*.sh                text eol=lf
+run                 text eol=lf
+packaging/launcher  text eol=lf
+*.bat               text eol=crlf
+*.ps1               text eol=crlf

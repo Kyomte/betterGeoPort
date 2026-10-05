@@ -67,7 +67,7 @@
     .leaflet-container{background:#0b0d11}
     .pin-marker{filter:drop-shadow(0 2px 3px rgba(0,0,0,.6))}
     .hint{font-size:11px;color:var(--muted);line-height:1.5}
-    #sudoWarn{display:none;background:#16202e;border-bottom:1px solid #24364d;color:#9cc4ef;font-size:12px;padding:9px 16px;line-height:1.45}
+    #setupWarn{display:none;background:#16202e;border-bottom:1px solid #24364d;color:#9cc4ef;font-size:12px;padding:9px 16px;line-height:1.45}
     .steps{counter-reset:s;margin:4px 0 2px;padding:0;list-style:none}
     .steps li{counter-increment:s;position:relative;padding:5px 0 5px 28px;font-size:12.5px;color:var(--muted);line-height:1.45}
     .steps li::before{content:counter(s);position:absolute;left:0;top:4px;width:18px;height:18px;border-radius:50%;background:var(--accent);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center}
@@ -89,7 +89,7 @@
       <span class="logo">📍 betterGeoPort</span>
       <span id="onlineBadge" class="badge"><span class="dot"></span><span>…</span></span>
     </header>
-    <div id="sudoWarn">{{ sudo_message }}</div>
+    <div id="setupWarn"{% if setup_message %} style="display:block"{% endif %}>{{ setup_message }}</div>
 
     <div class="scroll">
       <!-- DEVICES -->
@@ -267,7 +267,7 @@ async function refreshDevices(){
   const seen = new Set();
   Object.keys(data).forEach(udid => {
     const conns = data[udid];
-    const transports = Object.keys(conns);            // USB and/or Wifi, as macOS sees it
+    const transports = Object.keys(conns);            // USB and/or Wifi, as the OS usbmux sees it
     const info = (conns["USB"] || conns[transports[0]])[0];
     const prev = state.devices[udid];
     const selected = (prev && transports.includes(prev.selected)) ? prev.selected
@@ -517,7 +517,14 @@ document.getElementById("clearCacheBtn").onclick = async () => { if(confirm("Cle
 document.getElementById("searchBtn").onclick = search;
 document.getElementById("searchInput").addEventListener("keydown", e=>{ if(e.key==="Enter") search(); });
 
-if("{{ sudo_message }}".trim()) document.getElementById("sudoWarn").style.display="block";
+async function refreshSetup(){
+  const m = await api("/app_meta");
+  if(m.error) return;
+  const el = document.getElementById("setupWarn");
+  el.textContent = m.setup_message || "";
+  el.style.display = m.setup_message ? "block" : "none";
+}
+document.getElementById("refreshBtn").addEventListener("click", refreshSetup);
 
 (async function init(){
   await loadProviders();

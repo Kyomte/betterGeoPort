@@ -1,6 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for the GeoPort rebuild.
+# PyInstaller spec for the GeoPort rebuild (macOS and Windows).
+import sys
 from PyInstaller.utils.hooks import collect_all, copy_metadata
+
+IS_WIN = sys.platform == 'win32'
+# macOS keeps the 'GeoPort' name that build_app.sh / packaging/launcher expect.
+APP_NAME = 'betterGeoPort' if IS_WIN else 'GeoPort'
 
 datas = [('templates', 'templates'), ('static', 'static')]
 binaries = []
@@ -8,11 +13,14 @@ hiddenimports = []
 
 # pymobiledevice3 and the parts of its tree that ship data files / native libs
 # or use dynamic imports PyInstaller's static analysis can miss.
+# (pytun_pmd3 carries wintun.dll on Windows.)
 COLLECT_PKGS = [
     'pymobiledevice3', 'developer_disk_image', 'ipsw_parser', 'zeroconf',
     'ifaddr', 'construct', 'pyimg4', 'apple_compress', 'qh3', 'pytun_pmd3',
     'sslpsk_pmd3', 'opack', 'bpylist2', 'pykdebugparser', 'remotezip',
 ]
+if IS_WIN:
+    COLLECT_PKGS += ['lzfse', 'pylzss']
 for pkg in COLLECT_PKGS:
     try:
         d, b, h = collect_all(pkg)
@@ -47,8 +55,13 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, [],
     exclude_binaries=True,
-    name='GeoPort',
+    name=APP_NAME,
+    # The console window doubles as the "app is running" indicator on Windows:
+    # close it to quit.
     console=True,
     target_arch=None,
+    # Windows: request elevation (UAC) on launch — iOS 17+ tunnels need admin.
+    uac_admin=IS_WIN,
+    icon='packaging/AppIcon.ico' if IS_WIN else None,
 )
-coll = COLLECT(exe, a.binaries, a.datas, name='GeoPort')
+coll = COLLECT(exe, a.binaries, a.datas, name=APP_NAME)

@@ -1,0 +1,77 @@
+name: CI
+
+# Hardware-free checks on both supported platforms: install exactly as the
+# README says, run the tests, build the packaged app, then launch it and poke
+# its HTTP endpoints. (Real-device tunnels can't run on hosted runners.)
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create venv + install requirements (README steps)
+        run: |
+          python -m venv .venv
+          if [ "$RUNNER_OS" = "Windows" ]; then PY=.venv/Scripts/python.exe; else PY=.venv/bin/python; fi
+          "$PY" -m pip install --upgrade pip
+          "$PY" -m pip install -r requirements.txt pyinstaller
+          echo "PY=$PWD/$PY" >> "$GITHUB_ENV"
+
+      - name: Import the device/tunnel stack
+        run: |
+          "$PY" -c "import pymobiledevice3.remote.tunnel_service, pytun_pmd3, device_manager; print('TUN backend:', pytun_pmd3.TunTapDevice.__module__)"
+
+      - name: Tests
+        run: |
+          "$PY" test_multidevice.py
+          "$PY" test_smoke.py
+
+      - name: Build betterGeoPort.app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          source .venv/bin/activate
+          ./packaging/build_app.sh "$PWD/betterGeoPort.app"
+
+      - name: Build betterGeoPort.exe (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/build_windows.ps1
+
+      - name: Launch the packaged app and hit its endpoints
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            APP_BIN=dist/betterGeoPort/betterGeoPort.exe
+            # The .exe requests elevation in its manifest; run it as the invoker here.
+            export __COMPAT_LAYER=RunAsInvoker
+          else
+            APP_BIN=betterGeoPort.app/Contents/Resources/GeoPort/GeoPort
+          fi
+          PORT=54330
+          "$APP_BIN" --no-browser --no-elevate --port $PORT > app.log 2>&1 &
+          trap 'echo "--- app.log"; cat app.log' EXIT
+          for i in $(seq 1 120); do curl -sf -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 1; done
+          curl -sf "http://127.0.0.1:$PORT/" -o page.html
+          grep -q 'id="setupWarn"' page.html
+          curl -sf "http://127.0.0.1:$PORT/static/vendor/leaflet/leaflet.js" -o /dev/null
+          curl -sf "http://127.0.0.1:$PORT/app_meta" | "$PY" -c "import sys, json; print('setup_message:', json.load(sys.stdin)['setup_message'])"
+          echo "list_devices: $(curl -sf "http://127.0.0.1:$PORT/list_devices")"
+          curl -sf -X POST "http://127.0.0.1:$PORT/exit"
+          for i in $(seq 1 15); do curl -s -o /dev/null -m 1 "http://127.0.0.1:$PORT/" || exit 0; sleep 1; done
+          echo "app did not shut down"; exit 1
