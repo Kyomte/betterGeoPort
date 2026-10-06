@@ -53,7 +53,7 @@
     .device .actions{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}
     .status{font-size:11px;margin-top:6px}
     .status .s-idle{color:var(--muted)} .status .s-connected{color:#93c5fd}
-    .status .s-locating{color:var(--ok)} .status .s-error{color:var(--err)} .status .s-connecting{color:var(--warn)}
+    .status .s-locating{color:var(--ok)} .status .s-error{color:var(--err)} .status .s-connecting,.status .s-setting{color:var(--warn)}
     select,input[type=text],input[type=number]{font:inherit;background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:7px 9px;width:100%}
     input[type=number]{width:auto;flex:1}
     label.fld{font-size:11px;color:var(--muted);display:block;margin:8px 0 4px}
@@ -67,6 +67,12 @@
     .leaflet-container{background:#0b0d11}
     .pin-marker{filter:drop-shadow(0 2px 3px rgba(0,0,0,.6))}
     .hint{font-size:11px;color:var(--muted);line-height:1.5}
+    .saved-item{display:flex;align-items:stretch;gap:6px;margin-bottom:6px}
+    .saved-item .go{flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-start;text-align:left;padding:6px 9px}
+    .saved-item .go .n{font-size:13px;font-weight:600;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .saved-item .go .c{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+    .saved-item .del{padding:0 10px;color:var(--muted)}
+    .saved-item .del:hover{color:#fda4af}
     #setupWarn{display:none;background:#16202e;border-bottom:1px solid #24364d;color:#9cc4ef;font-size:12px;padding:9px 16px;line-height:1.45}
     .steps{counter-reset:s;margin:4px 0 2px;padding:0;list-style:none}
     .steps li{counter-increment:s;position:relative;padding:5px 0 5px 28px;font-size:12.5px;color:var(--muted);line-height:1.45}
@@ -126,6 +132,12 @@
             <input id="lngInput" type="text" class="coords" value="-3.7038" />
           </div>
           <button id="gotoBtn" class="sm" title="Center the map on these coordinates" style="align-self:flex-end">Go</button>
+        </div>
+        <label class="fld" style="margin-top:14px">Saved locations <span id="savedCount"></span></label>
+        <div id="savedList"></div>
+        <div class="row">
+          <input id="saveName" type="text" maxlength="40" placeholder="Name this spot…" />
+          <button id="saveBtn" class="sm" title="Save the coordinates above">☆ Save</button>
         </div>
         <div class="row" style="margin-top:14px">
           <button id="setAllBtn" class="primary grow btn-lg">📡 Set all devices here</button>
@@ -333,7 +345,8 @@ function renderDevices(){
 function statusLabel(status, s){
   if(status==="error") return "⚠ " + (s.lastError||"error");
   if(status==="locating" && s && s.location) return `📍 simulating ${s.location.lat.toFixed(4)}, ${s.location.lng.toFixed(4)}`;
-  return ({idle:"Not connected",connecting:"Connecting…",connected:"Connected — ready"})[status] || status;
+  return ({idle:"Not connected",connecting:"Connecting…",connected:"Connected — ready",
+           setting:"⏳ Setting location — waiting for the device…"})[status] || status;
 }
 function mkBtn(label,cls,fn){ const b=document.createElement("button"); b.className=cls; b.textContent=label; b.onclick=fn; return b; }
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -388,8 +401,12 @@ async function setDevice(udid, latlng){
   const ll = latlng || targetLatLng() || (state.markers[udid] && state.markers[udid].getLatLng());
   if(!ll){ toast("Click a spot on the map first","err"); return; }
   if(state.markers[udid]) state.markers[udid].setLatLng(ll);   // move this device's pin to the target
+  const name = state.devices[udid].name;
+  toast(`Setting ${name}…`);
   const res = await api("/set_location", {udid, lat:ll.lat, lng:ll.lng});
-  if(res.error) toast("Set: "+res.error,"err"); else toast(`${state.devices[udid].name} → ${ll.lat.toFixed(4)}, ${ll.lng.toFixed(4)}`,"ok");
+  if(res.error) toast(`${name}: ${res.error}`,"err");
+  else if(res.pending) toast(`${name}: still waiting for the device…`);
+  else toast(`${name} → ${ll.lat.toFixed(4)}, ${ll.lng.toFixed(4)}`,"ok");
   pollStatus();
 }
 async function stopDevice(udid){
@@ -411,7 +428,7 @@ async function setAll(){
   if(!connected.length){ toast("No connected devices","err"); return; }
   connected.forEach(u => { if(state.markers[u]) state.markers[u].setLatLng(ll); });
   await api("/set_all_locations",{lat:ll.lat,lng:ll.lng});
-  toast(`Set ${connected.length} device(s) → ${ll.lat.toFixed(4)}, ${ll.lng.toFixed(4)}`,"ok");
+  toast(`Setting ${connected.length} device(s) → ${ll.lat.toFixed(4)}, ${ll.lng.toFixed(4)}…`);
   pollStatus();
 }
 async function stopAll(){
@@ -424,6 +441,13 @@ async function pollStatus(){
   const d = await api("/device_status");
   let created = false;
   (d.devices||[]).forEach(dev => {
+    const prev = state.sessions[dev.udid];
+    if(prev && prev.status === "setting" && dev.status !== "setting"){
+      // a pending set resolved — say how it went
+      if(dev.status === "locating" && dev.location)
+        toast(`${dev.name} → ${dev.location.lat.toFixed(4)}, ${dev.location.lng.toFixed(4)}`,"ok");
+      else if(dev.status === "error") toast(`${dev.name}: ${dev.lastError||"set failed"}`,"err");
+    }
     state.sessions[dev.udid] = dev;
     // Restore a map pin for any connected device that doesn't have one yet
     // (e.g. after a page reload), placing it at its current simulated location.
@@ -499,7 +523,72 @@ async function search(){
     if(!j.length){ toast("No result","err"); return; }
     const ll = {lat:+j[0].lat, lng:+j[0].lon};
     map.setView(ll, 14); targetMarker.setLatLng(ll); syncInputs(ll);
+    document.getElementById("saveName").value = q;   // ready to ☆ Save under the searched name
   }catch(e){ toast("Search failed","err"); }
+}
+
+/* ---- saved locations (max 5) ----
+   Stored only in this browser's localStorage — never sent to the server or
+   written to disk by betterGeoPort. */
+const SAVED_KEY = "betterGeoPort.savedLocations", SAVED_MAX = 5, SAVED_NAME_MAX = 40;
+function loadSaved(){
+  try{
+    const v = JSON.parse(localStorage.getItem(SAVED_KEY) || "[]");
+    if(!Array.isArray(v)) return [];
+    return v.filter(l => l && l.id && typeof l.name==="string" && isFinite(+l.lat) && isFinite(+l.lng))
+            .map(l => ({id:String(l.id), name:l.name, lat:+l.lat, lng:+l.lng}))
+            .slice(0, SAVED_MAX);
+  }catch(e){ return []; }
+}
+function storeSaved(items){
+  try{ localStorage.setItem(SAVED_KEY, JSON.stringify(items)); return true; }
+  catch(e){ return false; }
+}
+function refreshSaved(){
+  const items = loadSaved(), max = SAVED_MAX;
+  const list = document.getElementById("savedList");
+  list.innerHTML = "";
+  items.forEach(loc => {
+    const row = document.createElement("div"); row.className = "saved-item";
+    const go = document.createElement("button"); go.className = "go";
+    go.title = "Move the target here";
+    const n = document.createElement("span"); n.className = "n"; n.textContent = loc.name;
+    const c = document.createElement("span"); c.className = "c"; c.textContent = `${loc.lat.toFixed(4)}, ${loc.lng.toFixed(4)}`;
+    go.append(n, c);
+    go.onclick = () => {
+      const ll = {lat:loc.lat, lng:loc.lng};
+      map.setView(ll, Math.max(map.getZoom(), 12)); targetMarker.setLatLng(ll); syncInputs(ll);
+    };
+    const del = document.createElement("button"); del.className = "del sm"; del.textContent = "✕";
+    del.title = `Delete “${loc.name}”`;
+    del.onclick = () => {
+      if(!storeSaved(loadSaved().filter(l => l.id !== loc.id))) toast("Couldn't update saved locations","err");
+      refreshSaved();
+    };
+    row.append(go, del);
+    list.appendChild(row);
+  });
+  const full = items.length >= max;
+  document.getElementById("savedCount").textContent = `(${items.length}/${max})`;
+  document.getElementById("saveBtn").disabled = full;
+  document.getElementById("saveName").disabled = full;
+  document.getElementById("saveName").placeholder = full ? `Full — delete one to save another` : "Name this spot…";
+}
+function saveLocation(){
+  const ll = targetLatLng();
+  if(!ll || Math.abs(ll.lat) > 90 || Math.abs(ll.lng) > 180){ toast("Enter valid coordinates first","err"); return; }
+  const lat = +ll.lat.toFixed(6), lng = +ll.lng.toFixed(6);
+  const items = loadSaved();
+  if(items.length >= SAVED_MAX){ toast(`You can save up to ${SAVED_MAX} locations — delete one first.`,"err"); return; }
+  const dup = items.find(l => l.lat === lat && l.lng === lng);
+  if(dup){ toast(`Already saved as “${dup.name}”`,"err"); return; }
+  const nameEl = document.getElementById("saveName");
+  const name = nameEl.value.trim().replace(/\s+/g," ").slice(0, SAVED_NAME_MAX) || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  if(!storeSaved([...items, {id, name, lat, lng}])){ toast("This browser blocked saving (private mode?)","err"); return; }
+  toast(`Saved “${name}”`,"ok");
+  nameEl.value = "";
+  refreshSaved();
 }
 
 /* ---- wire up ---- */
@@ -516,6 +605,8 @@ document.getElementById("downloadBtn").onclick = downloadArea;
 document.getElementById("clearCacheBtn").onclick = async () => { if(confirm("Clear all cached map tiles?")){ const r=await api("/clear_cache",{}); toast(`Cleared ${r.cleared} tiles`); refreshOffline(); } };
 document.getElementById("searchBtn").onclick = search;
 document.getElementById("searchInput").addEventListener("keydown", e=>{ if(e.key==="Enter") search(); });
+document.getElementById("saveBtn").onclick = saveLocation;
+document.getElementById("saveName").addEventListener("keydown", e=>{ if(e.key==="Enter") saveLocation(); });
 
 async function refreshSetup(){
   const m = await api("/app_meta");
@@ -528,6 +619,7 @@ document.getElementById("refreshBtn").addEventListener("click", refreshSetup);
 
 (async function init(){
   await loadProviders();
+  refreshSaved();
   await refreshOffline();
   await refreshDevices();
   await pollStatus();

@@ -135,7 +135,13 @@ Then:
    jumps there. Drag the coloured pin to move it live.
 4. **Multiple devices:** connect several, then **📡 Set all devices here** to put
    them all on one point, or move each pin independently.
-5. **Stop:** **Stop** (one device) or **Stop all** clears the simulation.
+5. **Saved locations:** **☆ Save** keeps up to 5 named spots under *Set location*;
+   click one to jump back to it. They're stored only in your browser's local
+   storage, never on the server or in the repo, and they persist across restarts.
+   The storage is tied to the page's address (`http://localhost:54321`), so if you
+   launch betterGeoPort while it's already running, it reopens that address
+   instead of starting a second copy on another port.
+6. **Stop:** **Stop** (one device) or **Stop all** clears the simulation.
 
 ### Wi-Fi vs USB
 
@@ -149,6 +155,11 @@ network device:
 - **Windows:** connect the device once by USB and turn on Wi-Fi sync for it in the
   Apple Devices app (*“Sync with this device over Wi-Fi”* in iTunes). Then keep it
   awake on the same network.
+- **Both:** on the iPhone/iPad, turn **Private Wi-Fi Address** **Off** for that network
+  (*Settings → Wi-Fi → ⓘ*). With it on, the device appears under a randomised
+  address, so the computer can't recognise it as the device it paired with and
+  never offers Wi-Fi. "Fixed" and "Rotating" are still randomised, so it must be
+  Off, and it's a per-network setting.
 
 ### Offline maps
 

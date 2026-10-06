@@ -14,10 +14,11 @@ from device_manager import DeviceManager, DeviceSession
 _active = {}            # udid -> bool, True while that device's loc thread runs
 
 
-def fake_location_worker(self, lat, lng):
+def fake_location_worker(self, lat, lng, terminate, done):
     _active[self.udid] = True
     try:
-        while not self._terminate_location.is_set():
+        self._location_ok(lat, lng, terminate, done)    # device confirmed
+        while not terminate.is_set():
             time.sleep(0.02)
     finally:
         _active[self.udid] = False
@@ -94,6 +95,25 @@ def main():
     assert not _active["UDID-A"] and not _active["UDID-B"]
     assert a.location is None and b.location is None
     print("PASS: stop_all clears every device")
+
+    # 6) a failed set must never claim to be simulating
+    def failing_worker(self, lat, lng, terminate, done):
+        time.sleep(0.05)
+        self._location_failed("device timed out", terminate, done)
+
+    real_worker = DeviceSession._location_worker
+    DeviceSession._location_worker = failing_worker
+    try:
+        ok, err = a.set_location(9.0, 9.0, wait=2)
+        assert ok is False and err == "device timed out", (ok, err)
+        assert a.status == "error" and a.location is None
+        ok, err = b.set_location(9.0, 9.0)               # no wait: pending
+        assert ok is None and b.status == "setting" and b.location is None
+        time.sleep(0.2)
+        assert b.status == "error" and b.location is None
+    finally:
+        DeviceSession._location_worker = real_worker
+    print("PASS: failed sets report 'error', never 'simulating'")
 
     print("\nALL MULTI-DEVICE LOGIC TESTS PASSED")
 

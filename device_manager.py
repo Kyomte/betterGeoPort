@@ -32,9 +32,35 @@ from pymobiledevice3.remote.tunnel_service import (
     create_core_device_tunnel_service_using_remotepairing,
     get_remote_pairing_tunnel_services,
     CoreDeviceTunnelProxy,
+    RemotePairingTunnel,
 )
 
 logger = logging.getLogger("GeoPort")
+
+
+if sys.platform == "win32":
+    async def _tun_read_task_ipv6_only(self):
+        """Forward only IPv6 packets from the Wintun adapter to the device.
+
+        pymobiledevice3 4.13.x forwards *every* packet Windows emits on the
+        adapter, including IPv4 chatter on the 169.254.x.x address Windows
+        auto-assigns it. The device frames the tunnel stream by IPv6 header
+        length, so a single IPv4 packet desyncs it: the first connection works,
+        then every later one times out (WinError 121). Upstream pymobiledevice3
+        drops non-IPv6 packets; do the same. async_read() is also cancellable,
+        so the tunnel can shut down cleanly.
+        """
+        try:
+            while True:
+                packet = await self.tun.async_read()
+                if packet and (packet[0] >> 4) == 6:
+                    await self.send_packet_to_device(packet)
+        except ConnectionResetError:
+            logger.warning("tunnel: connection reset while forwarding to the device")
+        except OSError as exc:
+            logger.warning(f"tunnel: {exc.__class__.__name__} while forwarding to the device")
+
+    RemotePairingTunnel.tun_read_task = _tun_read_task_ipv6_only
 
 # Discovering RSD services, toggling macOS `remoted` (a no-op elsewhere) and
 # creating the TUN adapter (utun on macOS, Wintun on Windows) must not happen
@@ -308,40 +334,69 @@ class DeviceSession:
             raise
 
     # ----- location ---------------------------------------------------- #
-    def set_location(self, lat, lng):
+    def set_location(self, lat, lng, wait=0):
+        """Start simulating (lat, lng). Status is "setting" until the device
+        confirms it ("locating"), or "error" if it fails — never "locating"
+        on a mere attempt. With wait > 0, block up to that many seconds for the
+        outcome and return (ok, error); ok is None while still pending."""
+        done = threading.Event()
         with self._lock:
             self._stop_location_thread()
-            self.location = (lat, lng)
-            self._terminate_location = threading.Event()
+            self.location = None
+            self.last_error = None
+            self.status = "setting"
+            terminate = self._terminate_location = threading.Event()
             self._location_thread = threading.Thread(
-                target=self._location_worker, args=(lat, lng), daemon=True)
+                target=self._location_worker, args=(lat, lng, terminate, done), daemon=True)
             self._location_thread.start()
-            self.status = "locating"
+        if wait and done.wait(wait):
+            return self.status == "locating", self.last_error
+        return None, None
 
-    def _location_worker(self, lat, lng):
+    def _location_ok(self, lat, lng, terminate, done):
+        if not terminate.is_set():                      # not superseded by a newer set
+            self.location = (lat, lng)
+            self.status = "locating"
+            self.last_error = None
+            logger.warning(f"[{self.name}] Location set {lat},{lng}")
+        done.set()
+
+    def _location_failed(self, message, terminate, done):
+        if not terminate.is_set():
+            self.location = None
+            self.status = "error"
+            self.last_error = message
+            logger.error(f"[{self.name}] set location error: {message}")
+        done.set()
+
+    def _location_worker(self, lat, lng, terminate, done):
         try:
             if is_ios_17_plus(self.ios_version):
-                asyncio.run(self._location_worker_rsd(lat, lng))
+                asyncio.run(self._location_worker_rsd(lat, lng, terminate, done))
             else:
                 with DvtSecureSocketProxyService(lockdown=self.lockdown) as dvt:
                     LocationSimulation(dvt).clear()
                     LocationSimulation(dvt).set(lat, lng)
-                    logger.warning(f"[{self.name}] Location set {lat},{lng}")
-                    while not self._terminate_location.is_set():
+                    self._location_ok(lat, lng, terminate, done)
+                    while not terminate.is_set():
                         time.sleep(0.5)
         except ConnectionResetError:
-            self.last_error = "Connection reset — try Stop Location to clear old connections."
-            logger.error(f"[{self.name}] {self.last_error}")
+            self._location_failed("Connection reset — try Stop, or Disconnect and Connect again.",
+                                  terminate, done)
         except Exception as exc:                        # noqa: BLE001
-            self.last_error = str(exc)
-            logger.error(f"[{self.name}] set location error: {exc}")
+            if getattr(exc, "winerror", None) == 121 or isinstance(exc, TimeoutError):
+                message = ("The device didn't answer through the tunnel (timed out). "
+                           "Disconnect and Connect again; for Wi-Fi keep it unlocked nearby.")
+            else:
+                message = str(exc) or exc.__class__.__name__
+            self._location_failed(message, terminate, done)
 
-    async def _location_worker_rsd(self, lat, lng):
+    async def _location_worker_rsd(self, lat, lng, terminate, done):
         async with RemoteServiceDiscoveryService((self.rsd_host, int(self.rsd_port))) as rsd:
             with DvtSecureSocketProxyService(rsd) as dvt:
                 LocationSimulation(dvt).set(lat, lng)
-                logger.warning(f"[{self.name}] Location set {lat},{lng}")
-                while not self._terminate_location.is_set():
+                self._location_ok(lat, lng, terminate, done)
+                while not terminate.is_set():
                     await asyncio.sleep(0.5)
 
     def _stop_location_thread(self):
@@ -433,8 +488,8 @@ class DeviceManager:
         results = {}
         for sess in self.connected_sessions():
             try:
-                sess.set_location(lat, lng)
-                results[sess.udid] = "ok"
+                sess.set_location(lat, lng)             # outcome shows up in status()
+                results[sess.udid] = "setting"
             except Exception as exc:                    # noqa: BLE001
                 results[sess.udid] = f"error: {exc}"
         return results

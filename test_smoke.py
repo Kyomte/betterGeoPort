@@ -82,6 +82,60 @@ with socket.socket() as srv:
 assert not main.is_port_in_use(busy)
 print("PASS: port-in-use check")
 
+# ---- stable address (saved locations live in the browser, per origin) ---- #
+import threading
+from werkzeug.serving import make_server
+srv = make_server("127.0.0.1", 0, main.app, threaded=True)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+assert main.running_instance(srv.server_port), "should recognise a running betterGeoPort"
+with socket.socket() as other:                   # some other program on a port
+    other.bind(("127.0.0.1", 0))
+    other.listen()
+    taken = other.getsockname()[1]
+    assert not main.running_instance(taken)
+    main.args.port = taken
+    picked = main.choose_port()
+    main.args.port = None
+    assert taken < picked < taken + 20, (taken, picked)   # next free port, not random
+srv.shutdown()
+print("PASS: reuses a running instance; busy port falls back to the next one")
+
+# ---- saved locations UI is present (stored in localStorage only) --------- #
+for el in ('id="savedList"', 'id="saveName"', 'id="saveBtn"', "localStorage"):
+    assert el in html, el
+assert "/saved_locations" not in html          # nothing is sent to the server
+print("PASS: saved-locations UI present, browser-only")
+
+# ---- Windows tunnel: only IPv6 may reach the device ---------------------- #
+if main.is_windows:
+    import asyncio
+    from pymobiledevice3.remote.tunnel_service import RemotePairingTunnel
+
+    class _FakeTun:
+        def __init__(self, packets):
+            self.packets = list(packets)
+
+        async def async_read(self):
+            if not self.packets:
+                raise ConnectionResetError
+            return self.packets.pop(0)
+
+    class _FakeTunnel:
+        tun_read_task = RemotePairingTunnel.tun_read_task
+
+        def __init__(self, packets):
+            self.tun, self.sent = _FakeTun(packets), []
+
+        async def send_packet_to_device(self, packet):
+            self.sent.append(packet)
+
+    ipv4 = bytes([0x45]) + bytes(19)                  # Windows' 169.254.x.x chatter
+    ipv6 = bytes([0x60]) + bytes(39)
+    t = _FakeTunnel([ipv4, ipv6, None, ipv4, ipv6])
+    asyncio.run(t.tun_read_task())
+    assert t.sent == [ipv6, ipv6], t.sent
+    print("PASS: Windows tunnel forwards only IPv6 packets to the device")
+
 # ---- tiles: Carto without a key ------------------------------------------ #
 carto = "/tiles/carto_voyager/6/31/24.png"
 carto_path = tiles._tile_path("carto_voyager", 6, 31, 24)

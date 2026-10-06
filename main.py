@@ -326,8 +326,13 @@ def set_location():
     coords = _coords_from(data, udid)
     if coords is None:
         return jsonify({'error': 'No coordinates'}), 400
-    sess.set_location(*coords)
-    return jsonify({'success': True, 'udid': udid, 'location': {'lat': coords[0], 'lng': coords[1]}})
+    # Wait briefly for the device to confirm; a slow/failed attempt stays
+    # "setting" and resolves to "locating" or "error" via /device_status.
+    ok, err = sess.set_location(*coords, wait=8)
+    if ok is False:
+        return jsonify({'error': err, 'udid': udid})
+    return jsonify({'success': True, 'pending': ok is None, 'udid': udid,
+                    'location': {'lat': coords[0], 'lng': coords[1]}})
 
 
 @app.route('/stop_location', methods=['POST'])
@@ -436,18 +441,33 @@ def is_port_in_use(port):
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
+def running_instance(port):
+    """True if a betterGeoPort server is already answering on this port."""
+    if not is_port_in_use(port):
+        return False
+    try:
+        with requests.Session() as s:
+            s.trust_env = False                         # never route localhost via a proxy
+            return "app_version" in s.get(f"http://127.0.0.1:{port}/app_meta", timeout=2).json()
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
 def choose_port():
+    """Keep the address stable: the browser keys saved locations (localStorage)
+    to the exact origin, so a random port would make them seem to vanish."""
     global chosen_port
-    chosen_port = args.port or 54321
-    if is_port_in_use(chosen_port):
-        chosen_port = random.randint(49215, 65535)
+    first = args.port or chosen_port
+    chosen_port = next((p for p in range(first, first + 20) if not is_port_in_use(p)),
+                       random.randint(49215, 65535))
+    if chosen_port != first:
+        logger.warning(f"Port {first} is busy — using {chosen_port}. Saved locations belong "
+                       f"to the address they were saved on, so ones from :{first} won't show here.")
     logger.info(f"Serving: http://localhost:{chosen_port}")
     return chosen_port
 
 
-def open_browser():
-    time.sleep(1.5)
-    url = f'http://localhost:{chosen_port}'
+def open_url(url):
     try:
         if is_windows:
             # We are usually elevated here; going through explorer.exe hands the
@@ -457,6 +477,11 @@ def open_browser():
             webbrowser.get().open(url)
     except Exception:                                   # noqa: BLE001
         pass
+
+
+def open_browser():
+    time.sleep(1.5)
+    open_url(f'http://localhost:{chosen_port}')
 
 
 def relaunch_as_admin():
@@ -471,6 +496,15 @@ def relaunch_as_admin():
 
 
 if __name__ == '__main__':
+    # Launched again while already running? Reuse that instance (same address,
+    # so the browser's saved locations are there) instead of starting a second.
+    _port = args.port or chosen_port
+    if running_instance(_port):
+        logger.info(f"betterGeoPort is already running — opening http://localhost:{_port}")
+        if not args.no_browser:
+            open_url(f"http://localhost:{_port}")
+        sys.exit(0)
+
     if is_windows:
         if not _is_admin() and not args.no_elevate:
             if relaunch_as_admin():
