@@ -27,6 +27,7 @@ import threading
 import subprocess
 import webbrowser
 
+import psutil
 import requests
 import pycountry
 from flask import Flask, jsonify, render_template, request
@@ -49,6 +50,9 @@ parser.add_argument('--udid', type=str, help='Device UDID to target')
 parser.add_argument('--host', type=str, default='127.0.0.1', help='Interface to bind (default localhost)')
 parser.add_argument('--no-elevate', action='store_true',
                     help='Windows: do not relaunch as Administrator via UAC')
+parser.add_argument('--watch-pid', type=int,
+                    help='Quit, putting devices back on their real location, when this '
+                         'process ends (the macOS app passes its launcher)')
 args = parser.parse_args()
 
 _log_dir = os.path.join(os.path.expanduser("~"), "GeoPort")
@@ -294,8 +298,8 @@ def mount_developer_image_route():
 @app.route('/disconnect_device', methods=['POST'])
 def disconnect_device():
     data = request.get_json(force=True, silent=True) or {}
-    manager.remove(data.get('udid'))
-    return jsonify({'disconnected': True})
+    ok, err = manager.remove(data.get('udid'))
+    return jsonify({'disconnected': True, 'reset': ok, 'error': err})
 
 
 # --------------------------------------------------------------------------- #
@@ -433,10 +437,69 @@ def exit_app():
 
 
 def _shutdown():
-    manager.shutdown()
+    release_devices()
     time.sleep(0.5)
     if not is_windows:              # on Windows os.kill() is TerminateProcess
         os.kill(os.getpid(), signal.SIGINT)
+    os._exit(0)
+
+
+_release_lock = threading.Lock()
+_released = False
+
+
+def release_devices():
+    """Put every device back on its real location and close its tunnel, once.
+    The device keeps a simulated location after this process is gone (until
+    it restarts), so this has to run however betterGeoPort is quit."""
+    global _released
+    with _release_lock:
+        if _released:
+            return
+        _released = True
+        if manager.sessions():
+            logger.warning("Quitting: putting devices back on their real location…")
+        manager.shutdown()
+
+
+def install_quit_handlers(watch_pid=None):
+    """Run release_devices() before exiting when the console window is closed,
+    on Ctrl+C / Ctrl+Break, and at logoff or shutdown (Windows), or on
+    SIGINT / SIGTERM / SIGHUP (macOS, Linux); and, given watch_pid, once that
+    process (the macOS app's launcher) is gone."""
+    if watch_pid:
+        threading.Thread(target=_quit_with, args=(watch_pid,), daemon=True).start()
+    if is_windows:
+        from ctypes import wintypes
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+        def on_console_event(_event):
+            release_devices()                           # Windows allows ~5 s
+            os._exit(0)
+
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(on_console_event, True)
+        install_quit_handlers.handler = on_console_event    # keep the callback alive
+    else:
+        def on_signal(_signum, _frame):
+            release_devices()
+            os._exit(0)
+
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, on_signal)
+
+
+def _quit_with(pid):
+    """The macOS app runs this server as root behind an admin prompt, and
+    quitting (or force-quitting) the app may not signal it at all, so follow
+    the app's launcher process instead and quit when it ends."""
+    try:
+        launcher = psutil.Process(pid)
+        while launcher.is_running() and launcher.status() != psutil.STATUS_ZOMBIE:
+            time.sleep(1)
+    except psutil.Error:                                # already gone
+        pass
+    logger.warning("The app was quit")
+    release_devices()
     os._exit(0)
 
 
@@ -526,6 +589,7 @@ if __name__ == '__main__':
         logger.warning(notice)
         logger.warning("*" * 60)
 
+    install_quit_handlers(args.watch_pid)
     threading.Thread(target=refresh_app_meta, daemon=True).start()
     choose_port()
     if not args.no_browser:

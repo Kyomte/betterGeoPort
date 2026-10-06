@@ -143,9 +143,9 @@
           <button id="setAllBtn" class="primary grow btn-lg">📡 Set all devices here</button>
         </div>
         <div class="row" style="margin-top:8px">
-          <button id="stopAllBtn" class="danger grow sm">Stop all devices</button>
+          <button id="stopAllBtn" class="danger grow sm">↩ All devices back to real location</button>
         </div>
-        <div class="hint" style="margin-top:10px">Each connected device gets its own coloured pin — drag a pin to move just that one.</div>
+        <div class="hint" style="margin-top:10px">Each connected device gets its own coloured pin — drag a pin to move just that one. Closing betterGeoPort also puts every connected device back on its real location.</div>
       </section>
 
       <!-- OFFLINE MAPS (collapsible / advanced) -->
@@ -323,6 +323,7 @@ function renderDevices(){
         </div>
       </div>
       <div class="status"><span class="s-${status}">${statusLabel(status, s)}</span></div>
+      ${(!connected && s && s.location) ? `<div class="status"><span class="s-setting">📍 May still be at ${s.location.lat.toFixed(4)}, ${s.location.lng.toFixed(4)}. ↩ Real location puts it back.</span></div>` : ""}
       <div class="actions"></div>`;
     if(!lockTransport){
       el.querySelectorAll(".transport").forEach(chip => chip.onclick = () => {
@@ -334,9 +335,10 @@ function renderDevices(){
       const b = mkBtn(status==="connecting"?"Connecting…":"Connect","primary sm",()=>connectDevice(udid));
       if(status==="connecting") b.disabled = true;
       actions.appendChild(b);
+      if(status!=="connecting") actions.appendChild(resetBtn(udid));
     } else {
       actions.appendChild(mkBtn("Set here","sm",()=>setDevice(udid)));
-      actions.appendChild(mkBtn("Stop","sm danger",()=>stopDevice(udid)));
+      actions.appendChild(resetBtn(udid));
       actions.appendChild(mkBtn("Disconnect","sm",()=>disconnectDevice(udid)));
     }
     list.appendChild(el);
@@ -349,6 +351,11 @@ function statusLabel(status, s){
            setting:"⏳ Setting location — waiting for the device…"})[status] || status;
 }
 function mkBtn(label,cls,fn){ const b=document.createElement("button"); b.className=cls; b.textContent=label; b.onclick=fn; return b; }
+function resetBtn(udid){
+  const b = mkBtn("↩ Real location","sm danger",()=>resetDevice(udid));
+  b.title = "Stop simulating and put the device back on its real GPS location (connects first if needed)";
+  return b;
+}
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 async function connectDevice(udid){
@@ -409,16 +416,27 @@ async function setDevice(udid, latlng){
   else toast(`${name} → ${ll.lat.toFixed(4)}, ${ll.lng.toFixed(4)}`,"ok");
   pollStatus();
 }
-async function stopDevice(udid){
+async function resetDevice(udid){
+  const name = state.devices[udid].name;
+  const s = state.sessions[udid];
+  if(!(s && (s.connected || s.location))){
+    // Not connected: it may still be stuck from an earlier session, so connect first.
+    await connectDevice(udid);
+    if(!(state.sessions[udid] && state.sessions[udid].connected)) return;
+  }
+  toast(`Putting ${name} back on its real location…`);
   const res = await api("/stop_location",{udid});
-  if(res.error) toast("Stop: "+res.error,"err"); else toast(`${state.devices[udid].name} stopped`,"ok");
+  if(res.error) toast(`${name}: ${res.error}`,"err");
+  else toast(`${name} is back on its real location`,"ok");
   pollStatus();
 }
 async function disconnectDevice(udid){
-  await api("/disconnect_device",{udid});
+  const name = state.devices[udid].name;
+  const res = await api("/disconnect_device",{udid});
   if(state.markers[udid]){ map.removeLayer(state.markers[udid]); delete state.markers[udid]; }
   delete state.sessions[udid];
-  toast("Disconnected");
+  if(res.reset === false) toast(`${name} disconnected. ${res.error}`,"err");
+  else toast(`${name} disconnected and back on its real location`,"ok");
   pollStatus(); refreshDevices();
 }
 
@@ -432,8 +450,11 @@ async function setAll(){
   pollStatus();
 }
 async function stopAll(){
-  await api("/stop_all_locations",{});
-  toast("Stopped all devices");
+  toast("Putting all devices back on their real location…");
+  const r = await api("/stop_all_locations",{});
+  const failed = Object.values(r.results||{}).filter(v => v !== "ok").length;
+  if(failed) toast(`${failed} device(s) couldn't be put back. See the device list.`,"err");
+  else toast("All devices are back on their real location","ok");
   pollStatus();
 }
 

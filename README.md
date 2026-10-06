@@ -141,7 +141,15 @@ Then:
    The storage is tied to the page's address (`http://localhost:54321`), so if you
    launch betterGeoPort while it's already running, it reopens that address
    instead of starting a second copy on another port.
-6. **Stop:** **Stop** (one device) or **Stop all** clears the simulation.
+6. **Back to the real location:** **↩ Real location** (one device) or **↩ All devices
+   back to real location** stops the simulation, and only reports success once the
+   device confirms it. If the connection dropped, it reconnects first. The button is
+   also there when a device isn't connected, so a device left on a fake location
+   (say, after a crash) can be put back without restarting it. **Disconnect** and
+   quitting betterGeoPort put connected devices back too: closing its console
+   window or Ctrl+C on Windows; quitting (or force-quitting) the app, Ctrl+C, or
+   closing the Terminal window on macOS. Without one of these, iOS keeps the
+   simulated location until the device restarts.
 
 ### Wi-Fi vs USB
 

@@ -42,6 +42,7 @@ jobs:
         run: |
           "$PY" test_multidevice.py
           "$PY" test_smoke.py
+          "$PY" test_quit.py
 
       - name: Build betterGeoPort.app (macOS)
         if: runner.os == 'macOS'
@@ -73,5 +74,17 @@ jobs:
           curl -sf "http://127.0.0.1:$PORT/app_meta" | "$PY" -c "import sys, json; print('setup_message:', json.load(sys.stdin)['setup_message'])"
           echo "list_devices: $(curl -sf "http://127.0.0.1:$PORT/list_devices")"
           curl -sf -X POST "http://127.0.0.1:$PORT/exit"
-          for i in $(seq 1 15); do curl -s -o /dev/null -m 1 "http://127.0.0.1:$PORT/" || exit 0; sleep 1; done
-          echo "app did not shut down"; exit 1
+          stopped() { for i in $(seq 1 15); do curl -s -o /dev/null -m 1 "http://127.0.0.1:$PORT/" || return 0; sleep 1; done; return 1; }
+          stopped || { echo "app did not shut down"; exit 1; }
+
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # The .app's launcher passes --watch-pid; quitting the app ends that
+            # process, and the server must follow (resetting devices on the way).
+            sleep 600 & LAUNCHER=$!
+            "$APP_BIN" --no-browser --port $PORT --watch-pid $LAUNCHER > app.log 2>&1 &
+            for i in $(seq 1 120); do curl -sf -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 1; done
+            curl -sf -o /dev/null "http://127.0.0.1:$PORT/"
+            kill $LAUNCHER
+            stopped || { echo "app kept running after its launcher quit"; exit 1; }
+            grep -q "The app was quit" app.log
+          fi

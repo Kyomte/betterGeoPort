@@ -15,6 +15,7 @@ thread-safe instead of global.
 
 import sys
 import time
+import socket
 import asyncio
 import logging
 import threading
@@ -93,6 +94,25 @@ def tunnel_alive(client):
             return False
     writer = getattr(client, "_writer", None)
     return not (writer is not None and writer.is_closing())
+
+
+CLEAR_ACK_TIMEOUT = 5
+
+
+def clear_simulated_location(dvt):
+    """Put the device back on its real GPS location.
+
+    iOS keeps a simulated location until it is cleared or the device restarts;
+    closing the connection does not end it. pymobiledevice3's
+    LocationSimulation.clear() only sends the request, so also wait for the
+    device's reply before the connection is closed under it."""
+    channel = dvt.make_channel(LocationSimulation.IDENTIFIER)
+    channel.stopLocationSimulation()
+    dvt.service.socket.settimeout(CLEAR_ACK_TIMEOUT)
+    try:
+        channel.receive_plist()
+    except socket.timeout:
+        logger.warning("location reset sent, but the device didn't acknowledge it")
 
 
 def is_ios_17_plus(version_string):
@@ -220,8 +240,8 @@ class DeviceSession:
 
     def _start_tunnel_blocking(self, attempts=20):
         """Spawn the per-device tunnel thread and wait for rsd_host/port."""
+        self._close_tunnel()                            # never two tunnels to one device
         self._terminate_tunnel.clear()
-        self.rsd_host = self.rsd_port = None
         self._tunnel_thread = threading.Thread(target=self._tunnel_worker, daemon=True)
         self._tunnel_thread.start()
         for _ in range(attempts):
@@ -249,9 +269,9 @@ class DeviceSession:
                 self._tunnel_error = LOST_CONNECTION
             else:
                 self._tunnel_error = f"{exc.__class__.__name__}: {exc}".strip()
-            # The tunnel is gone, and with it any simulated location.
+            # The tunnel is gone, but the device keeps simulating self.location
+            # until it is cleared, so remember it (stop_location reconnects).
             self.rsd_host = self.rsd_port = None
-            self.location = None
             self._terminate_location.set()
             if sys.platform == "win32" and not _windows_admin():
                 # Creating the Wintun adapter is what fails without elevation.
@@ -445,14 +465,17 @@ class DeviceSession:
                 asyncio.run(self._location_worker_rsd(lat, lng, terminate, done))
             else:
                 with DvtSecureSocketProxyService(lockdown=self.lockdown) as dvt:
+                    if terminate.is_set():              # stopped while connecting
+                        done.set()
+                        return
                     LocationSimulation(dvt).clear()
                     LocationSimulation(dvt).set(lat, lng)
                     self._location_ok(lat, lng, terminate, done)
                     while not terminate.is_set():
                         time.sleep(0.5)
         except ConnectionResetError:
-            self._location_failed("Connection reset — try Stop, or Disconnect and Connect again.",
-                                  terminate, done)
+            self._location_failed("Connection reset — try ↩ Real location, or Disconnect and "
+                                  "Connect again.", terminate, done)
         except Exception as exc:                        # noqa: BLE001
             if getattr(exc, "winerror", None) == 121 or isinstance(exc, TimeoutError):
                 message = ("The device didn't answer through the tunnel (timed out). "
@@ -464,6 +487,9 @@ class DeviceSession:
     async def _location_worker_rsd(self, lat, lng, terminate, done):
         async with RemoteServiceDiscoveryService((self.rsd_host, int(self.rsd_port))) as rsd:
             with DvtSecureSocketProxyService(rsd) as dvt:
+                if terminate.is_set():                  # stopped while connecting: a late
+                    done.set()                          # set would undo the reset
+                    return
                 LocationSimulation(dvt).set(lat, lng)
                 self._location_ok(lat, lng, terminate, done)
                 while not terminate.is_set():
@@ -475,41 +501,84 @@ class DeviceSession:
             self._location_thread.join(timeout=3)
         self._location_thread = None
 
-    def stop_location(self):
-        """Stop this device's location thread and clear the simulated location on-device."""
+    def linked(self):
+        """True while there is a live connection to send commands over."""
+        if is_ios_17_plus(self.ios_version):
+            return bool(self.rsd_host and self.rsd_port)
+        return self.lockdown is not None
+
+    def stop_location(self, reconnect=True):
+        """Stop simulating and put the device back on its real location,
+        confirmed by the device. If the connection has dropped (or the clear
+        fails over a stale one), reconnect and try again, unless
+        reconnect=False. Returns (ok, error)."""
         with self._lock:
             self._stop_location_thread()
-            try:
-                if is_ios_17_plus(self.ios_version):
-                    if self.rsd_host and self.rsd_port:
-                        asyncio.run(self._clear_location_rsd())
-                elif self.lockdown is not None:
-                    with DvtSecureSocketProxyService(lockdown=self.lockdown) as dvt:
-                        LocationSimulation(dvt).clear()
+            error = None
+            for attempt in range(2 if reconnect else 1):
+                if attempt or not self.linked():
+                    if not reconnect:
+                        break
+                    if not self.begin_connect():
+                        return False, "Still connecting. Try again in a moment."
+                    try:
+                        self.mount_developer_image()    # unmounted if the device restarted
+                    except Exception as exc:            # noqa: BLE001
+                        logger.info(f"[{self.name}] mount note: {exc.__class__.__name__}: {exc}")
+                    ok, error = self.connect()
+                    if not ok:
+                        break
+                try:
+                    self._clear_on_device()
+                except Exception as exc:                # noqa: BLE001
+                    error = str(exc) or exc.__class__.__name__
+                    logger.warning(f"[{self.name}] location reset failed: {error}")
+                    continue
                 self.location = None
                 self.status = "connected"
-                logger.warning(f"[{self.name}] Location cleared")
+                self.last_error = None
+                logger.warning(f"[{self.name}] Back to the real location")
                 return True, None
-            except Exception as exc:                    # noqa: BLE001
-                self.last_error = str(exc)
-                return False, str(exc)
+            if error is None:                           # not linked, reconnect=False
+                if self.location is None:
+                    return True, None                   # nothing we set is left on it
+                error = "the connection to the device was lost"
+            self.status = "error"
+            self.last_error = ("Couldn't put the device back on its real location "
+                               f"({error}). Unlock it and press ↩ Real location.")
+            return False, self.last_error
+
+    def _clear_on_device(self):
+        if is_ios_17_plus(self.ios_version):
+            asyncio.run(self._clear_location_rsd())
+        else:
+            with DvtSecureSocketProxyService(lockdown=self.lockdown) as dvt:
+                clear_simulated_location(dvt)
 
     async def _clear_location_rsd(self):
         async with RemoteServiceDiscoveryService((self.rsd_host, int(self.rsd_port))) as rsd:
             with DvtSecureSocketProxyService(rsd) as dvt:
-                LocationSimulation(dvt).clear()
+                clear_simulated_location(dvt)
+
+    def _close_tunnel(self):
+        self._terminate_tunnel.set()
+        if self._tunnel_thread and self._tunnel_thread.is_alive():
+            self._tunnel_thread.join(timeout=3)
+        self._tunnel_thread = None
+        self.rsd_host = self.rsd_port = None
 
     def disconnect(self):
+        """Put the device back on its real location, then close the connection.
+        Doesn't reconnect to do it (quitting can't wait for that)."""
         with self._lock:
             try:
-                self.stop_location()
-            except Exception:                           # noqa: BLE001
-                pass
-            self._terminate_tunnel.set()
-            if self._tunnel_thread and self._tunnel_thread.is_alive():
-                self._tunnel_thread.join(timeout=3)
-            self.rsd_host = self.rsd_port = self.lockdown = None
+                ok, error = self.stop_location(reconnect=False)
+            except Exception as exc:                    # noqa: BLE001
+                ok, error = False, str(exc)
+            self._close_tunnel()
+            self.lockdown = None
             self.status = "idle"
+            return ok, error
 
 
 class DeviceManager:
@@ -538,10 +607,13 @@ class DeviceManager:
             return sess
 
     def remove(self, udid):
+        """Disconnect and forget a device. Returns (ok, error) for putting it
+        back on its real location."""
         with self._lock:
             sess = self._sessions.pop(udid, None)
         if sess:
-            sess.disconnect()
+            return sess.disconnect()
+        return True, None
 
     def sessions(self):
         with self._lock:
@@ -565,15 +637,33 @@ class DeviceManager:
         return results
 
     def stop_all(self):
+        """Put every device back on its real location, including ones whose
+        connection dropped while they were still simulating one."""
         results = {}
-        for sess in self.connected_sessions():
+        for sess in self.sessions():
+            if not (sess.linked() or sess.location):
+                continue
             ok, err = sess.stop_location()
             results[sess.udid] = "ok" if ok else f"error: {err}"
         return results
 
-    def shutdown(self):
-        for sess in self.sessions():
-            try:
-                sess.disconnect()
-            except Exception:                           # noqa: BLE001
-                pass
+    def shutdown(self, timeout=4):
+        """Disconnect every device, putting each back on its real location.
+        In parallel and for at most `timeout` seconds: Windows ends the process
+        about 5 s after its console window is closed."""
+        threads = [threading.Thread(target=self._disconnect_quietly, args=(s,), daemon=True)
+                   for s in self.sessions()]
+        for t in threads:
+            t.start()
+        deadline = time.monotonic() + timeout
+        for t in threads:
+            t.join(max(0, deadline - time.monotonic()))
+
+    @staticmethod
+    def _disconnect_quietly(sess):
+        try:
+            ok, err = sess.disconnect()
+            if not ok:
+                logger.error(f"[{sess.name}] left on the simulated location: {err}")
+        except Exception as exc:                        # noqa: BLE001
+            logger.error(f"[{sess.name}] disconnect failed: {exc}")

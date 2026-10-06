@@ -24,24 +24,15 @@ def fake_location_worker(self, lat, lng, terminate, done):
         _active[self.udid] = False
 
 
-def fake_clear(self):
-    return None
+_cleared = []           # udids the device was told to drop the simulated location for
+
+
+def fake_clear_on_device(self):
+    _cleared.append(self.udid)
 
 
 DeviceSession._location_worker = fake_location_worker
-DeviceSession._clear_location_rsd = fake_clear  # not awaited in this path
-
-
-def fake_stop_location(self):
-    # mirror real stop_location but skip the device clear call
-    with self._lock:
-        self._stop_location_thread()
-        self.location = None
-        self.status = "connected"
-        return True, None
-
-
-DeviceSession.stop_location = fake_stop_location
+DeviceSession._clear_on_device = fake_clear_on_device
 
 
 def make_connected(mgr, udid, name):
@@ -142,6 +133,133 @@ def main():
 
     assert asyncio.run(check()) == (True, False, False)
     print("PASS: dropped tunnels are detected")
+
+    # 9) "Real location" on a device whose tunnel dropped mid-simulation
+    #    reconnects, then clears it (the device keeps the fake spot until then)
+    connects = []
+
+    def fake_connect(self):
+        connects.append(self.udid)
+        self.rsd_host, self.rsd_port = "127.0.0.1", "12345"
+        self.status = "connected"
+        return True, None
+
+    def failing_connect(self):
+        connects.append(self.udid)
+        self.status, self.last_error = "error", "device not found"
+        return False, "device not found"
+
+    real_connect, real_mount = DeviceSession.connect, DeviceSession.mount_developer_image
+    DeviceSession.connect = fake_connect
+    DeviceSession.mount_developer_image = lambda self: None
+    try:
+        a.set_location(10.0, 20.0, wait=2)
+        a.rsd_host = a.rsd_port = None                  # the tunnel died
+        a.status = "error"
+        _cleared.clear()
+        ok, err = a.stop_location()
+        assert ok and err is None, (ok, err)
+        assert connects == ["UDID-A"] and _cleared == ["UDID-A"]
+        assert a.location is None and a.status == "connected"
+        print("PASS: Real location reconnects a dropped device, then clears it")
+
+        # 10) a clear that fails over a stale tunnel is retried on a fresh one
+        attempts = []
+
+        def flaky_clear(self):
+            attempts.append(self.udid)
+            if len(attempts) == 1:
+                raise TimeoutError("stale tunnel")
+            _cleared.append(self.udid)
+
+        DeviceSession._clear_on_device = flaky_clear
+        connects.clear(), _cleared.clear()
+        b.set_location(1.0, 2.0, wait=2)
+        ok, err = b.stop_location()
+        DeviceSession._clear_on_device = fake_clear_on_device
+        assert ok and len(attempts) == 2 and connects == ["UDID-B"] and _cleared == ["UDID-B"]
+        print("PASS: a failed clear is retried once over a fresh connection")
+
+        # 11) an unreachable device is reported as still simulating, never as reset
+        DeviceSession.connect = failing_connect
+        a.set_location(5.0, 6.0, wait=2)
+        a.rsd_host = a.rsd_port = None
+        ok, err = a.stop_location()
+        assert not ok and "real location" in err and "device not found" in err, err
+        assert a.status == "error" and a.location == (5.0, 6.0)
+        print("PASS: an unreachable device reports the reset failed")
+
+        # 12) "All devices back" also reaches a device whose connection dropped
+        DeviceSession.connect = fake_connect
+        connects.clear(), _cleared.clear()
+        results = mgr.stop_all()
+        assert results == {"UDID-A": "ok", "UDID-B": "ok"}, results    # C never connected
+        assert connects == ["UDID-A"] and sorted(_cleared) == ["UDID-A", "UDID-B"]
+        assert a.location is None
+        print("PASS: stop_all also resets devices that lost their connection")
+
+        # 13) Disconnect doesn't reconnect, and says when it left a device simulating
+        mgr2 = DeviceManager()
+        lost = make_connected(mgr2, "UDID-L", "iPhone-L")
+        lost.set_location(3.0, 3.0, wait=2)
+        lost.rsd_host = lost.rsd_port = None
+        connects.clear()
+        ok, err = mgr2.remove("UDID-L")
+        assert not ok and "real location" in err and connects == [], (ok, err)
+        mgr2.get_or_create("UDID-N", "USB", "26.0")    # never connected or set
+        assert mgr2.remove("UDID-N") == (True, None)
+        print("PASS: Disconnect reports a device it couldn't put back")
+
+        # 14) quitting resets every device in parallel, and in bounded time
+        def slow_clear(self):
+            if self.udid == "UDID-Z":
+                time.sleep(30)                          # an unresponsive device
+            _cleared.append(self.udid)
+
+        DeviceSession._clear_on_device = slow_clear
+        for u in ("UDID-X", "UDID-Y", "UDID-Z"):
+            make_connected(mgr2, u, u).set_location(7.0, 7.0, wait=2)
+        connects.clear(), _cleared.clear()
+        started = time.monotonic()
+        mgr2.shutdown(timeout=1)
+        assert time.monotonic() - started < 2, "shutdown must not wait on a hung device"
+        assert sorted(_cleared) == ["UDID-X", "UDID-Y"] and connects == []
+        print("PASS: quitting resets all devices without hanging on one")
+    finally:
+        DeviceSession.connect, DeviceSession.mount_developer_image = real_connect, real_mount
+        DeviceSession._clear_on_device = fake_clear_on_device
+
+    # 15) the reset waits for the device's reply, but a silent device isn't an error
+    import socket
+    from device_manager import clear_simulated_location, LocationSimulation
+    calls = []
+
+    class FakeChannel:
+        def __init__(self, silent):
+            self.silent = silent
+
+        def stopLocationSimulation(self):
+            calls.append("stop")
+
+        def receive_plist(self):
+            calls.append("ack")
+            if self.silent:
+                raise socket.timeout("timed out")
+
+    class FakeDvt:
+        def __init__(self, silent):
+            self.channel = FakeChannel(silent)
+            self.service = SimpleNamespace(socket=SimpleNamespace(
+                settimeout=lambda t: calls.append(("timeout", t))))
+
+        def make_channel(self, identifier):
+            calls.append(identifier)
+            return self.channel
+
+    clear_simulated_location(FakeDvt(silent=False))
+    assert calls == [LocationSimulation.IDENTIFIER, "stop", ("timeout", 5), "ack"], calls
+    clear_simulated_location(FakeDvt(silent=True))
+    print("PASS: the reset waits for the device to acknowledge it")
 
     print("\nALL MULTI-DEVICE LOGIC TESTS PASSED")
 

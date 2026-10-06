@@ -32,6 +32,9 @@ fi
 
 # Run the server as root in the foreground (one password prompt). Blocks here
 # for the life of the server. Output goes to /tmp/geoport.log for debugging.
+# --watch-pid: $$ is this process, which becomes osascript (the app the Dock
+# quits). The server puts devices back on their real location and exits when
+# it ends, since quitting may not signal the root server itself.
 exec /usr/bin/osascript <<APPLESCRIPT
-do shell script "'${BIN}' --no-browser --port ${PORT} > /tmp/geoport.log 2>&1" with administrator privileges
+do shell script "'${BIN}' --no-browser --port ${PORT} --watch-pid $$ > /tmp/geoport.log 2>&1" with administrator privileges
 APPLESCRIPT
