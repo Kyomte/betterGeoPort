@@ -115,6 +115,34 @@ def main():
         DeviceSession._location_worker = real_worker
     print("PASS: failed sets report 'error', never 'simulating'")
 
+    # 7) a second Connect while one is in progress is refused
+    c = mgr.get_or_create("UDID-C", "Network", "27.0", name="iPhone-C")
+    assert c.begin_connect() and c.status == "connecting"
+    assert not c.begin_connect(), "double click must not start a second connect"
+    c.status = "error"
+    assert c.begin_connect(), "can retry after a failure"
+    print("PASS: concurrent connects to one device are refused")
+
+    # 8) a dropped tunnel is detected (cable pulled / Wi-Fi lost)
+    import asyncio
+    from types import SimpleNamespace
+    from device_manager import tunnel_alive
+
+    async def check():
+        running = asyncio.create_task(asyncio.sleep(60))
+        finished = asyncio.create_task(asyncio.sleep(0))
+        await asyncio.sleep(0.01)
+        open_writer = SimpleNamespace(is_closing=lambda: False)
+        closed_writer = SimpleNamespace(is_closing=lambda: True)
+        ok = tunnel_alive(SimpleNamespace(_tun_read_task=running, _sock_read_task=running, _writer=open_writer))
+        tun_dead = tunnel_alive(SimpleNamespace(_tun_read_task=finished, _sock_read_task=running, _writer=open_writer))
+        sock_closed = tunnel_alive(SimpleNamespace(_tun_read_task=running, _sock_read_task=running, _writer=closed_writer))
+        running.cancel()
+        return ok, tun_dead, sock_closed
+
+    assert asyncio.run(check()) == (True, False, False)
+    print("PASS: dropped tunnels are detected")
+
     print("\nALL MULTI-DEVICE LOGIC TESTS PASSED")
 
 

@@ -241,13 +241,18 @@ def connect_device():
 
     sess = manager.get_or_create(udid, conn_type, ios_version,
                                  name=data.get('deviceName'), device_class=data.get('deviceClass'))
+    # "connecting" from here on (incl. the image mount), so the UI doesn't
+    # offer Connect again and a double click can't open two tunnels.
+    if not sess.begin_connect():
+        return jsonify({'connected': False, 'device': sess.to_dict(),
+                        'error': 'Already connecting — please wait.'})
 
-    # Make sure the Developer Disk Image is mounted (idempotent; needs internet
-    # only the very first time per iOS build, then it is cached locally).
+    # Make sure the Developer Disk Image is mounted (needs internet only the
+    # first time; after that the cached copy is reused).
     try:
         sess.mount_developer_image()
     except Exception as exc:                            # noqa: BLE001
-        logger.info(f"[{sess.name}] mount note: {exc}")
+        logger.info(f"[{sess.name}] mount note: {exc.__class__.__name__}: {exc}")
 
     ok, err = sess.connect()
     return jsonify({'connected': ok, 'device': sess.to_dict(), 'error': err})
@@ -269,7 +274,7 @@ def enable_developer_mode_route():
     try:
         sess.mount_developer_image()
     except Exception as exc:                            # noqa: BLE001
-        logger.info(f"[{sess.name}] mount note: {exc}")
+        logger.info(f"[{sess.name}] mount note: {exc.__class__.__name__}: {exc}")
     return jsonify({'success': True, 'udid': udid})
 
 

@@ -21,7 +21,9 @@ import threading
 
 from pymobiledevice3.lockdown import create_using_usbmux
 from pymobiledevice3.services.amfi import AmfiService
-from pymobiledevice3.services.mobile_image_mounter import auto_mount
+from pymobiledevice3.common import get_home_folder
+from pymobiledevice3.services.mobile_image_mounter import (
+    auto_mount, MobileImageMounterService, PersonalizedImageMounter)
 from pymobiledevice3.exceptions import DeviceHasPasscodeSetError
 from pymobiledevice3.services.dvt.dvt_secure_socket_proxy import DvtSecureSocketProxyService
 from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
@@ -76,6 +78,21 @@ def _windows_admin():
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:                                   # noqa: BLE001
         return False
+
+
+LOST_CONNECTION = ("Lost the connection to the device (cable unplugged, Wi-Fi dropped, "
+                   "or it went to sleep). Unlock it and press Connect again.")
+
+
+def tunnel_alive(client):
+    """False once either direction of a pymobiledevice3 tunnel has stopped or
+    the device closed its end (the tunnel then carries nothing)."""
+    for name in ("_tun_read_task", "_sock_read_task"):
+        task = getattr(client, name, None)
+        if task is not None and task.done():
+            return False
+    writer = getattr(client, "_writer", None)
+    return not (writer is not None and writer.is_closing())
 
 
 def is_ios_17_plus(version_string):
@@ -151,6 +168,7 @@ class DeviceSession:
         self.status = "idle"                            # idle|connecting|connected|locating|error
         self.last_error = None
         self._lock = threading.RLock()
+        self._state_lock = threading.Lock()             # only guards begin_connect()
 
     # ----- serialisable view for the UI -------------------------------- #
     def to_dict(self):
@@ -167,6 +185,16 @@ class DeviceSession:
         }
 
     # ----- connection -------------------------------------------------- #
+    def begin_connect(self):
+        """Mark a connect as in progress; False if one already is (so a second
+        click doesn't open a second tunnel to the same device)."""
+        with self._state_lock:
+            if self.status == "connecting":
+                return False
+            self.status = "connecting"
+            self.last_error = None
+            return True
+
     def connect(self):
         """Establish the tunnel (iOS 17+) or lockdown (iOS < 17) for this device."""
         with self._lock:
@@ -217,7 +245,14 @@ class DeviceSession:
                 asyncio.run(self._tcp_tunnel())
         except Exception as exc:                        # noqa: BLE001
             import traceback
-            self._tunnel_error = f"{exc.__class__.__name__}: {exc}".strip()
+            if str(exc) == LOST_CONNECTION:
+                self._tunnel_error = LOST_CONNECTION
+            else:
+                self._tunnel_error = f"{exc.__class__.__name__}: {exc}".strip()
+            # The tunnel is gone, and with it any simulated location.
+            self.rsd_host = self.rsd_port = None
+            self.location = None
+            self._terminate_location.set()
             if sys.platform == "win32" and not _windows_admin():
                 # Creating the Wintun adapter is what fails without elevation.
                 self._tunnel_error += (" — iOS 17+ tunnels need Administrator rights; "
@@ -306,6 +341,8 @@ class DeviceSession:
             self.rsd_port = str(tunnel_result.port)
             while not self._terminate_tunnel.is_set():
                 await asyncio.sleep(0.5)
+                if not tunnel_alive(tunnel_result.client):
+                    raise ConnectionError(LOST_CONNECTION)
         finally:
             await tunnel_cm.__aexit__(None, None, None)
 
@@ -322,11 +359,44 @@ class DeviceSession:
         return True, None
 
     def mount_developer_image(self):
-        # auto_mount is an async coroutine in pymobiledevice3 4.13.x.
+        """Make sure the developer disk image is mounted (needed for location
+        simulation; the device unmounts it on every restart).
+
+        pymobiledevice3 4.13.x's auto_mount() re-downloads the ~16 MB
+        personalized image from GitHub whenever its cached build differs from
+        a hard-coded build ID, which is always the case now, so on every
+        connect, even when the image is already mounted. That made Connect
+        take minutes on slow Wi-Fi. Check first, and reuse the cached image."""
         lockdown = device_lockdown(self.udid, self.connection_type)
+        if not is_ios_17_plus(self.ios_version):
+            return self._auto_mount(lockdown)
+        if MobileImageMounterService(lockdown=lockdown).is_image_mounted("Personalized"):
+            logger.info(f"[{self.name}] developer image already mounted")
+            return
+        cache = get_home_folder() / "Xcode_iOS_DDI_Personalized"
+        files = [cache / "Image.dmg", cache / "BuildManifest.plist", cache / "Image.trustcache"]
+        if all(f.exists() for f in files):
+            started = time.time()
+            logger.info(f"[{self.name}] mounting developer image (cached copy)…")
+            try:
+                asyncio.run(PersonalizedImageMounter(lockdown=lockdown).mount(*files))
+                logger.info(f"[{self.name}] developer image mounted ({time.time() - started:.0f}s)")
+                return
+            except Exception as exc:                    # noqa: BLE001
+                if "AlreadyMounted" in exc.__class__.__name__:
+                    logger.info(f"[{self.name}] developer image already mounted")
+                    return
+                logger.info(f"[{self.name}] cached image didn't mount "
+                            f"({exc.__class__.__name__}: {exc}); downloading a fresh one")
+        self._auto_mount(lockdown)
+
+    def _auto_mount(self, lockdown):
+        started = time.time()
+        logger.info(f"[{self.name}] downloading + mounting developer image "
+                    f"(one-time, can take a few minutes on slow networks)…")
         try:
-            asyncio.run(auto_mount(lockdown))
-            logger.info(f"[{self.name}] developer image mounted")
+            asyncio.run(auto_mount(lockdown))           # async in pymobiledevice3 4.13.x
+            logger.info(f"[{self.name}] developer image mounted ({time.time() - started:.0f}s)")
         except Exception as exc:                        # noqa: BLE001
             if "already" in str(exc).lower() or "AlreadyMounted" in exc.__class__.__name__:
                 logger.info(f"[{self.name}] developer image already mounted")
