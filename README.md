@@ -73,7 +73,10 @@ pip install pyinstaller
 - Windows 10 or 11 (x64), Python **3.11 or 3.12** from [python.org](https://www.python.org/downloads/windows/)
   (3.13 doesn't work yet: one dependency, `sslpsk-pmd3`, has no Windows build for it)
 - **Apple Devices** from the Microsoft Store, or **iTunes**. This installs *Apple Mobile
-  Device Service*, which Windows needs to talk to an iPhone/iPad.
+  Device Service*, which Windows needs to talk to an iPhone/iPad. Apple Devices normally
+  starts it when you sign in, but not always (for example around an update of the app).
+  If it isn't running, betterGeoPort starts it, which for Apple Devices means opening
+  the app.
 - No compiler is needed: every native dependency ships a prebuilt Windows wheel.
 
 #### 2. Set up

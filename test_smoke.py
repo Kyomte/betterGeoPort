@@ -53,7 +53,7 @@ print(f"PASS: page renders on {main.current_platform}; banner: {notice or '(none
 msg = client.get("/app_meta").get_json()["setup_message"]
 if main.is_windows:
     assert ("Administrator" in msg) == (not main._is_admin())
-    assert ("Apple Mobile Device Service" in msg) == (not main._amds_running())
+    assert (main._amds_notice() in msg) == (not main._amds_running())
     assert "sudo" not in msg
 else:
     assert ("sudo" in msg) == (not main._is_admin())
@@ -70,8 +70,63 @@ print("PASS: non-local Host header rejected")
 r = client.get("/list_devices")
 assert r.status_code == 200 and isinstance(r.get_json(), dict), r.get_data()
 if main.is_windows and not main._amds_running():
-    assert r.get_json() == {"error": main.AMDS_MISSING}
+    assert r.get_json() == {"error": main._amds_notice()}
 print(f"PASS: /list_devices -> {r.get_json()}")
+
+# ---- one device that can't be reached doesn't hide the others ------------ #
+from types import SimpleNamespace
+real = (main.list_devices, main.create_using_usbmux, main.start_amds)
+main.start_amds = lambda wait=0: True
+
+
+def fake_create(udid, connection_type=None, autopair=True):
+    if udid == "GONE":                           # e.g. a stale Wi-Fi entry
+        raise RuntimeError("got an error message: {'MessageType': 'Result', 'Number': 3}")
+    return SimpleNamespace(short_info={"DeviceName": "Good"}, enable_wifi_connections=True)
+
+
+main.create_using_usbmux = fake_create
+main.list_devices = lambda: [SimpleNamespace(serial="GONE", connection_type="Network"),
+                             SimpleNamespace(serial="GOOD", connection_type="USB")]
+try:
+    assert list(client.get("/list_devices").get_json()) == ["GOOD"]
+    main.list_devices = lambda: [SimpleNamespace(serial="GONE", connection_type="Network")]
+    assert "'Number': 3" in client.get("/list_devices").get_json()["error"]
+finally:
+    main.list_devices, main.create_using_usbmux, main.start_amds = real
+print("PASS: an unreachable device is skipped, not fatal to the whole list")
+
+# ---- Windows: start Apple's device service when it isn't running --------- #
+import subprocess
+launched, up = [], [False]
+real = (main._amds_running, main._apple_devices_installed, main._itunes_amds_installed)
+
+
+def fake_popen(cmd, *a, **k):
+    launched.append(cmd)
+    up[0] = True                                 # opening the app starts the service
+
+
+main._amds_running = lambda: up[0]
+main._apple_devices_installed = lambda: True
+main._itunes_amds_installed = lambda: False
+main.subprocess = SimpleNamespace(Popen=fake_popen)
+main._amds_last_start[0] = float("-inf")
+try:
+    assert main.start_amds(wait=2) is True
+    assert launched == [["explorer.exe", r"shell:AppsFolder\AppleInc.AppleDevices_nzyj5cx40ttqa!App"]]
+    up[0] = False
+    assert main.start_amds() is False and len(launched) == 1, "opens it at most once a minute"
+    assert (main.AMDS_STARTING in main.setup_notices()) == main.is_windows
+    main._apple_devices_installed = lambda: False
+    main._amds_last_start[0] = float("-inf")
+    assert main.start_amds() is False and len(launched) == 1, "nothing installed to start"
+    assert (main.AMDS_MISSING in main.setup_notices()) == main.is_windows
+finally:
+    main._amds_running, main._apple_devices_installed, main._itunes_amds_installed = real
+    main.subprocess = subprocess
+    main._amds_last_start[0] = float("-inf")
+print("PASS: opens Apple Devices to start its device service, at most once a minute")
 
 # ---- port check ---------------------------------------------------------- #
 with socket.socket() as srv:

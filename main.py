@@ -115,6 +115,12 @@ def _is_admin():
 AMDS_ADDRESS = ("127.0.0.1", 27015)
 AMDS_MISSING = ("Apple Mobile Device Service not found — install the Apple Devices "
                 "app (Microsoft Store) or iTunes, then press Refresh.")
+AMDS_STARTING = ("Apple's device service isn't running yet — betterGeoPort is starting it "
+                 "(this can open the Apple Devices app). Press Refresh in a few seconds.")
+ITUNES_AMDS_SERVICE = "Apple Mobile Device Service"
+APPLE_DEVICES_PACKAGE = "AppleInc.AppleDevices_nzyj5cx40ttqa"
+_amds_start_lock = threading.Lock()
+_amds_last_start = [float("-inf")]
 
 
 def _amds_running():
@@ -125,6 +131,60 @@ def _amds_running():
         return False
 
 
+def _apple_devices_installed():
+    """The Microsoft Store "Apple Devices" app is installed for this user."""
+    return os.path.isdir(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages",
+                                      APPLE_DEVICES_PACKAGE))
+
+
+def _itunes_amds_installed():
+    """iTunes installs Apple Mobile Device Service as a regular Windows service."""
+    try:
+        import win32serviceutil
+        win32serviceutil.QueryServiceStatus(ITUNES_AMDS_SERVICE)
+        return True
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
+def start_amds(wait=0):
+    """Windows: start Apple's device service (usbmux) if it isn't running,
+    then wait up to `wait` seconds for it. The Store "Apple Devices" app
+    starts it from a sign-in startup task, which doesn't always happen (e.g.
+    around an update of the app); opening the app starts it too. Tries at most
+    once a minute. True once it's running."""
+    if _amds_running():
+        return True
+    with _amds_start_lock:
+        if time.monotonic() - _amds_last_start[0] >= 60:
+            if _itunes_amds_installed():
+                _amds_last_start[0] = time.monotonic()
+                logger.warning(f"{ITUNES_AMDS_SERVICE} isn't running — starting it")
+                try:
+                    import win32serviceutil
+                    win32serviceutil.StartService(ITUNES_AMDS_SERVICE)
+                except Exception as exc:                # noqa: BLE001
+                    logger.warning(f"Couldn't start {ITUNES_AMDS_SERVICE}: {exc}")
+            elif _apple_devices_installed():
+                _amds_last_start[0] = time.monotonic()
+                logger.warning("Apple's device service isn't running — opening Apple Devices to start it")
+                # explorer.exe hands it to the user's (unelevated) shell.
+                subprocess.Popen(["explorer.exe", rf"shell:AppsFolder\{APPLE_DEVICES_PACKAGE}!App"])
+            else:
+                return False
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if _amds_running():
+            return True
+        time.sleep(0.5)
+    return _amds_running()
+
+
+def _amds_notice():
+    installed = _apple_devices_installed() or _itunes_amds_installed()
+    return AMDS_STARTING if installed else AMDS_MISSING
+
+
 def setup_notices():
     """Things the user must fix before devices will work (shown as a banner)."""
     notices = []
@@ -133,7 +193,7 @@ def setup_notices():
             notices.append("Not running as Administrator — connecting iOS 17+ devices needs "
                            "admin rights. Restart betterGeoPort and accept the UAC prompt.")
         if not _amds_running():
-            notices.append(AMDS_MISSING)
+            notices.append(_amds_notice())
     elif not _is_admin():
         notices.append("Not running as root — connecting iOS 17+ devices needs sudo.")
     return " ".join(notices)
@@ -176,8 +236,11 @@ def refresh_app_meta():
 
 @app.route('/list_devices')
 def list_devices_route():
+    if is_windows and not start_amds(wait=20):
+        return jsonify({'error': _amds_notice()})
     try:
         connected = {}
+        skipped = []
 
         def add(udid, conn_type, info):
             connected.setdefault(udid, {}).setdefault(conn_type, []).append(info)
@@ -197,7 +260,14 @@ def list_devices_route():
         for device in list_devices():
             udid = device.serial
             conn_type = device.connection_type
-            ld = create_using_usbmux(udid, connection_type=conn_type, autopair=True)
+            try:
+                ld = create_using_usbmux(udid, connection_type=conn_type, autopair=True)
+            except Exception as exc:                    # noqa: BLE001
+                # e.g. a stale Wi-Fi entry, or unplugged mid-listing: don't let
+                # one device hide all the others.
+                skipped.append(f"{exc.__class__.__name__}: {exc}".rstrip(": "))
+                logger.info(f"list_devices: skipped {udid} ({conn_type}): {skipped[-1]}")
+                continue
             info = ld.short_info
             try:
                 if not ld.enable_wifi_connections:
@@ -210,12 +280,14 @@ def list_devices_route():
             info['userLocale'] = app_meta.get("user_locale")
             add(udid, "Wifi" if conn_type == "Network" else conn_type, info)
 
+        if skipped and not connected:
+            return jsonify({'error': skipped[0]})
         return jsonify(connected)
     except Exception as exc:                            # noqa: BLE001
-        logger.error(f"list_devices error: {exc}")
+        logger.error(f"list_devices error: {exc.__class__.__name__}: {exc}")
         if is_windows and not _amds_running():
-            return jsonify({'error': AMDS_MISSING})
-        return jsonify({'error': str(exc)})
+            return jsonify({'error': _amds_notice()})
+        return jsonify({'error': str(exc) or exc.__class__.__name__})
 
 
 # --------------------------------------------------------------------------- #
@@ -582,6 +654,7 @@ if __name__ == '__main__':
             ctypes.windll.kernel32.SetConsoleTitleW("betterGeoPort — close this window to quit")
         except Exception:                               # noqa: BLE001
             pass
+        start_amds()                                    # so devices list without opening Apple Devices
 
     notice = setup_notices()
     if notice:
