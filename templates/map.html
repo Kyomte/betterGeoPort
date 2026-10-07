@@ -275,7 +275,7 @@ function setProvider(key){
 /* ---- devices ---- */
 async function refreshDevices(){
   const data = await api("/list_devices");
-  if(data.error){ toast("Device list error: "+data.error,"err"); return; }
+  if("error" in data){ toast("Device list error: "+(data.error||"unknown error"),"err"); return; }
   const seen = new Set();
   Object.keys(data).forEach(udid => {
     const conns = data[udid];
