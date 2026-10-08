@@ -23,7 +23,7 @@ import logging
 import plistlib
 import threading
 
-from zeroconf import IPVersion, ServiceStateChange
+from zeroconf import DNSQuestionType, IPVersion, ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 from pymobiledevice3.lockdown import create_using_usbmux, create_using_tcp
 from pymobiledevice3.services.amfi import AmfiService
@@ -224,6 +224,8 @@ if sys.platform == "win32":
 else:
     PAIR_RECORD_DIRS = ["/var/db/lockdown", "/var/lib/lockdown"]
 wifi_hosts = {}                     # udid -> (IPv4 address, pair record), from discover_wifi()
+wifi_aliases = {}                   # private Wi-Fi MAC -> udid, from identify_wifi_devices()
+IDENTIFY_TIMEOUT = 5
 
 
 def paired_wifi_macs():
@@ -258,7 +260,11 @@ async def browse_wifi_sync(timeout):
     sync within `timeout` seconds. Not pymobiledevice3 4.13's browse_mobdev2(),
     which keeps only the first device each network adapter hears from, and
     only if its address arrived before the timeout: another iPhone or iPad on
-    the network (even one paired elsewhere) could hide the one we're after."""
+    the network (even one paired elsewhere) could hide the one we're after.
+
+    Asks for multicast answers (QM) from the first query. zeroconf's default
+    first asks for unicast ones, which didn't arrive on Windows (likely the
+    firewall), so devices only showed up 1-5 s later, after the timeout."""
     names = []
 
     def seen(zeroconf, service_type, name, state_change):
@@ -266,11 +272,13 @@ async def browse_wifi_sync(timeout):
             names.append(name)
 
     aiozc = AsyncZeroconf()
-    browser = AsyncServiceBrowser(aiozc.zeroconf, [WIFI_SYNC_SERVICE], handlers=[seen])
+    browser = AsyncServiceBrowser(aiozc.zeroconf, [WIFI_SYNC_SERVICE], handlers=[seen],
+                                  question_type=DNSQuestionType.QM)
     try:
         await asyncio.sleep(timeout)
         infos = [AsyncServiceInfo(WIFI_SYNC_SERVICE, name) for name in names]
-        await asyncio.gather(*(info.async_request(aiozc.zeroconf, 2000) for info in infos))
+        await asyncio.gather(*(info.async_request(aiozc.zeroconf, 2000, question_type=DNSQuestionType.QM)
+                               for info in infos))
     finally:
         await browser.async_cancel()
         await aiozc.async_close()
@@ -278,25 +286,73 @@ async def browse_wifi_sync(timeout):
             for info in infos}
 
 
+def identify_wifi_devices(hosts, records):
+    """{announced MAC: udid} for the devices in `hosts` ({announced MAC: IPv4})
+    that accept one of `records` ({udid: pair record}), asked in parallel for
+    up to IDENTIFY_TIMEOUT seconds. A device that doesn't know a record just
+    refuses it: this never asks to pair, so it can't show a Trust prompt."""
+    answers = {}
+
+    def ask(mac, ip):
+        for udid, record in records.items():
+            try:
+                lockdown = create_using_tcp(hostname=ip, identifier=udid, autopair=False,
+                                            pair_record=record)
+            except Exception:                           # noqa: BLE001
+                continue                                # not answering, or not an iOS device
+            try:
+                if lockdown.paired and lockdown.udid == udid:
+                    answers[mac] = udid
+                    return
+            finally:
+                lockdown.close()
+
+    threads = [threading.Thread(target=ask, args=item, daemon=True) for item in hosts.items()]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + IDENTIFY_TIMEOUT
+    for t in threads:
+        t.join(max(0, deadline - time.monotonic()))
+    return dict(answers)
+
+
 def discover_wifi(exclude=(), timeout=3):
     """Paired devices announcing themselves on the local network, other than
     the `exclude` UDIDs: {udid: IPv4 address}. Remembers them for
-    device_lockdown(). Doesn't browse if there's nobody else to look for."""
-    macs = {mac: v for mac, v in paired_wifi_macs().items() if v[0] not in exclude}
+    device_lockdown(). Doesn't browse if there's nobody else to look for.
+
+    A device using a private Wi-Fi address announces that address instead of
+    the MAC in its pair record (seen with an iPhone on iOS 27), so a paired
+    device not found by its MAC is looked for among the unknown ones by which
+    pair record they accept."""
+    paired = paired_wifi_macs()
+    macs = {mac: v for mac, v in paired.items() if v[0] not in exclude}
     if not macs:
         return {}
+    records = dict(macs.values())                       # udid -> pair record
     try:
         services = asyncio.run(browse_wifi_sync(timeout))
     except Exception as exc:                            # noqa: BLE001
         logger.info(f"Wi-Fi discovery failed: {exc.__class__.__name__}: {exc}")
         return {}
-    found = {}
+    found, unknown = {}, {}
     for name, ips in services.items():
         mac = name.split("@", 1)[0].lower()             # "<wifi mac>@<ipv6>…"
-        if mac in macs and ips:
-            udid, record = macs[mac]
-            wifi_hosts[udid] = (ips[0], record)
+        udid = macs[mac][0] if mac in macs else wifi_aliases.get(mac)
+        if not ips:
+            continue
+        if udid in records:
             found[udid] = ips[0]
+        elif udid is None and mac not in paired:        # not an excluded paired device
+            unknown[mac] = ips[0]
+    missing = {udid: record for udid, record in records.items() if udid not in found}
+    if missing and unknown:
+        for mac, udid in identify_wifi_devices(unknown, missing).items():
+            logger.info(f"Wi-Fi discovery: {udid} is using a private Wi-Fi address ({mac})")
+            wifi_aliases[mac] = udid
+            found[udid] = unknown[mac]
+    for udid, ip in found.items():
+        wifi_hosts[udid] = (ip, records[udid])
     logger.info(f"Wi-Fi discovery: found {len(found)} of {len(macs)} paired device(s) "
                 f"({len(services)} device(s) announcing on this network)")
     return found

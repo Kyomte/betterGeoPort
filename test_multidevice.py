@@ -325,10 +325,65 @@ def main():
         device_manager.wifi_hosts.clear()
     print("PASS: paired devices on Wi-Fi are found and reached without the OS usbmux")
 
+    # 16a) a paired device announcing a private Wi-Fi address (not the MAC in
+    #      its pair record) is found by the pair record it accepts
+    asked, closed = [], []
+    ipad = "00008120-00084DD634880032"                  # listed on Wi-Fi by the OS usbmux
+    with open(os.path.join(records, f"{ipad}.plist"), "wb") as f:
+        plistlib.dump({"WiFiMACAddress": "F4:B5:99:08:82:74", "HostPrivateKey": b"k"}, f)
+
+    class FakeLockdown:
+        def __init__(self, hostname, identifier, pair_record):
+            self.hostname = hostname
+            self.paired = hostname == "192.168.1.223" and pair_record["WiFiMACAddress"] == "D0:B3:24:10:CD:52"
+            self.udid = identifier if self.paired else None
+
+        def close(self):
+            closed.append(self.hostname)
+
+    async def private_browse(timeout):
+        return {"c2:1d:1e:73:5b:6b@fe80::c01d:1eff:fe73:5b6b-supportsRP-26._apple-mobdev2._tcp.local.":
+                    ["192.168.1.223"],                          # the iPhone, private address
+                "76:b2:be:9f:76:93@fe80::1-supportsRP-26._apple-mobdev2._tcp.local.":
+                    ["192.168.1.206"],                          # someone else's
+                "aa:aa:aa:aa:aa:aa@fe80::2-supportsRP-26._apple-mobdev2._tcp.local.":
+                    ["192.168.1.250"],                          # not answering
+                "f4:b5:99:08:82:74@fe80::f6b5:99ff:fe08:8274-supportsRP-24._apple-mobdev2._tcp.local.":
+                    ["192.168.1.234"]}                          # the iPad, excluded
+
+    def probe_tcp(hostname, identifier, autopair, pair_record):
+        asked.append((hostname, identifier, autopair))
+        if hostname == "192.168.1.250":
+            raise TimeoutError("timed out")
+        return FakeLockdown(hostname, identifier, pair_record)
+
+    real = (device_manager.PAIR_RECORD_DIRS, device_manager.get_home_folder,
+            device_manager.browse_wifi_sync, device_manager.create_using_tcp)
+    device_manager.PAIR_RECORD_DIRS = [records]
+    device_manager.get_home_folder = lambda: home
+    device_manager.browse_wifi_sync = private_browse
+    device_manager.create_using_tcp = probe_tcp
+    try:
+        assert device_manager.discover_wifi(exclude={ipad}) == {udid: "192.168.1.223"}
+        assert sorted(asked) == [("192.168.1.206", udid, False), ("192.168.1.223", udid, False),
+                                 ("192.168.1.250", udid, False)], \
+            "asks unknown devices only (not the excluded iPad), and never asks to pair"
+        assert sorted(closed) == ["192.168.1.206", "192.168.1.223"]
+        assert device_manager.wifi_hosts[udid][0] == "192.168.1.223"
+        asked.clear()
+        assert device_manager.discover_wifi(exclude={ipad}) == {udid: "192.168.1.223"} and not asked, \
+            "a private address already identified isn't asked again"
+    finally:
+        (device_manager.PAIR_RECORD_DIRS, device_manager.get_home_folder,
+         device_manager.browse_wifi_sync, device_manager.create_using_tcp) = real
+        device_manager.wifi_hosts.clear()
+        device_manager.wifi_aliases.clear()
+    print("PASS: a paired device using a private Wi-Fi address is found by its pair record")
+
     # 16b) the browse keeps every device announcing, not only the first one
     #      (pymobiledevice3's browse_mobdev2 did, so another iPhone hid the iPad)
     import ipaddress
-    from zeroconf import ServiceStateChange
+    from zeroconf import DNSQuestionType, ServiceStateChange
 
     class FakeZeroconf:
         zeroconf = "zc"
@@ -337,7 +392,8 @@ def main():
             pass
 
     class FakeBrowser:
-        def __init__(self, zc, types, handlers):
+        def __init__(self, zc, types, handlers, question_type=None):
+            assert question_type is DNSQuestionType.QM, "unicast answers didn't arrive on Windows"
             for name, change in (("other@fe80::1._apple-mobdev2._tcp.local.", ServiceStateChange.Added),
                                  ("ipad@fe80::2._apple-mobdev2._tcp.local.", ServiceStateChange.Added),
                                  ("ipad@fe80::2._apple-mobdev2._tcp.local.", ServiceStateChange.Updated),
@@ -351,7 +407,8 @@ def main():
         def __init__(self, service_type, name):
             self.name = name
 
-        async def async_request(self, zc, timeout):
+        async def async_request(self, zc, timeout, question_type=None):
+            assert question_type is DNSQuestionType.QM
             return True
 
         def ip_addresses_by_version(self, version):
