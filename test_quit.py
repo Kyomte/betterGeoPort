@@ -49,7 +49,14 @@ def start_child(*main_args, new_console=False):
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         si.wShowWindow = 7                      # SW_SHOWMINNOACTIVE
         kwargs = dict(creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=si)
-    proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--child", marker,
+    python = sys.executable
+    if IS_WINDOWS and sys._base_executable != sys.executable:
+        # A venv's python.exe only starts the real interpreter and relays its exit
+        # code, and closing the console makes Windows end it with 0xC000013A once
+        # main.py is done. Run the interpreter itself, as multiprocessing does.
+        python = sys._base_executable
+        kwargs["env"] = {**os.environ, "__PYVENV_LAUNCHER__": sys.executable}
+    proc = subprocess.Popen([python, os.path.abspath(__file__), "--child", marker,
                              *main_args], cwd=os.path.dirname(os.path.abspath(__file__)),
                             **kwargs)
     for _ in range(600):
