@@ -265,7 +265,6 @@ def main():
     import os
     import plistlib
     import tempfile
-    from pymobiledevice3.bonjour import BonjourAnswer
     records, home = tempfile.mkdtemp(), tempfile.mkdtemp()
     udid = "00008150-000C6D3C3C78C01C"
     for name, rec in ((f"{udid}.plist", {"WiFiMACAddress": "D0:B3:24:10:CD:52", "HostPrivateKey": b"k"}),
@@ -274,16 +273,16 @@ def main():
         with open(os.path.join(records, name), "wb") as f:
             plistlib.dump(rec, f)
     real = (device_manager.PAIR_RECORD_DIRS, device_manager.get_home_folder,
-            device_manager.browse_mobdev2, device_manager.create_using_usbmux,
+            device_manager.browse_wifi_sync, device_manager.create_using_usbmux,
             device_manager.create_using_tcp)
     browsed, tcp = [], []
 
     async def fake_browse(timeout):
         browsed.append(timeout)
-        return [BonjourAnswer(f"76:b2:be:9f:76:93@fe80::1-supportsRP-26._apple-mobdev2._tcp.local.",
-                              {}, ["192.168.1.206"], 32498),          # private address: unknown
-                BonjourAnswer(f"d0:b3:24:10:cd:52@fe80::d2b3:24ff:fe10:cd52-supportsRP-26._apple-mobdev2._tcp.local.",
-                              {}, ["fe80::1ca9%9", "192.168.1.207"], 32498)]
+        return {"76:b2:be:9f:76:93@fe80::1-supportsRP-26._apple-mobdev2._tcp.local.":
+                    ["192.168.1.206"],                          # paired elsewhere, answers first
+                "d0:b3:24:10:cd:52@fe80::d2b3:24ff:fe10:cd52-supportsRP-26._apple-mobdev2._tcp.local.":
+                    ["192.168.1.207"]}
 
     def no_usbmux(*a, **k):
         raise ConnectionRefusedError("not listed by usbmux")
@@ -296,7 +295,7 @@ def main():
 
     device_manager.PAIR_RECORD_DIRS = [records]
     device_manager.get_home_folder = lambda: home
-    device_manager.browse_mobdev2 = fake_browse
+    device_manager.browse_wifi_sync = fake_browse
     device_manager.create_using_usbmux = no_usbmux
     device_manager.create_using_tcp = fake_tcp
     device_manager.wifi_hosts.clear()
@@ -321,10 +320,56 @@ def main():
             assert str(exc) == device_manager.WIFI_ASLEEP
     finally:
         (device_manager.PAIR_RECORD_DIRS, device_manager.get_home_folder,
-         device_manager.browse_mobdev2, device_manager.create_using_usbmux,
+         device_manager.browse_wifi_sync, device_manager.create_using_usbmux,
          device_manager.create_using_tcp) = real
         device_manager.wifi_hosts.clear()
     print("PASS: paired devices on Wi-Fi are found and reached without the OS usbmux")
+
+    # 16b) the browse keeps every device announcing, not only the first one
+    #      (pymobiledevice3's browse_mobdev2 did, so another iPhone hid the iPad)
+    import ipaddress
+    from zeroconf import ServiceStateChange
+
+    class FakeZeroconf:
+        zeroconf = "zc"
+
+        async def async_close(self):
+            pass
+
+    class FakeBrowser:
+        def __init__(self, zc, types, handlers):
+            for name, change in (("other@fe80::1._apple-mobdev2._tcp.local.", ServiceStateChange.Added),
+                                 ("ipad@fe80::2._apple-mobdev2._tcp.local.", ServiceStateChange.Added),
+                                 ("ipad@fe80::2._apple-mobdev2._tcp.local.", ServiceStateChange.Updated),
+                                 ("gone@fe80::3._apple-mobdev2._tcp.local.", ServiceStateChange.Removed)):
+                handlers[0](zeroconf=zc, service_type=types[0], name=name, state_change=change)
+
+        async def async_cancel(self):
+            pass
+
+    class FakeInfo:
+        def __init__(self, service_type, name):
+            self.name = name
+
+        async def async_request(self, zc, timeout):
+            return True
+
+        def ip_addresses_by_version(self, version):
+            return [ipaddress.ip_address("192.168.1.206" if self.name.startswith("other")
+                                         else "192.168.1.234")]
+
+    real = (device_manager.AsyncZeroconf, device_manager.AsyncServiceBrowser,
+            device_manager.AsyncServiceInfo)
+    (device_manager.AsyncZeroconf, device_manager.AsyncServiceBrowser,
+     device_manager.AsyncServiceInfo) = FakeZeroconf, FakeBrowser, FakeInfo
+    try:
+        assert asyncio.run(device_manager.browse_wifi_sync(0)) == {
+            "other@fe80::1._apple-mobdev2._tcp.local.": ["192.168.1.206"],
+            "ipad@fe80::2._apple-mobdev2._tcp.local.": ["192.168.1.234"]}
+    finally:
+        (device_manager.AsyncZeroconf, device_manager.AsyncServiceBrowser,
+         device_manager.AsyncServiceInfo) = real
+    print("PASS: Wi-Fi discovery keeps every device on the network, not just the first")
 
     # 17) a device that stops answering while being prepared fails the check
     #     instead of hanging it (pymobiledevice3's sockets have no timeout)

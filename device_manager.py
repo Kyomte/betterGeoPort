@@ -23,7 +23,8 @@ import logging
 import plistlib
 import threading
 
-from pymobiledevice3.bonjour import browse_mobdev2
+from zeroconf import IPVersion, ServiceStateChange
+from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 from pymobiledevice3.lockdown import create_using_usbmux, create_using_tcp
 from pymobiledevice3.services.amfi import AmfiService
 from pymobiledevice3.common import get_home_folder
@@ -249,6 +250,34 @@ def paired_wifi_macs():
     return found
 
 
+WIFI_SYNC_SERVICE = "_apple-mobdev2._tcp.local."
+
+
+async def browse_wifi_sync(timeout):
+    """{service name: [IPv4 addresses]} for every device announcing Wi-Fi
+    sync within `timeout` seconds. Not pymobiledevice3 4.13's browse_mobdev2(),
+    which keeps only the first device each network adapter hears from, and
+    only if its address arrived before the timeout: another iPhone or iPad on
+    the network (even one paired elsewhere) could hide the one we're after."""
+    names = []
+
+    def seen(zeroconf, service_type, name, state_change):
+        if state_change is not ServiceStateChange.Removed and name not in names:
+            names.append(name)
+
+    aiozc = AsyncZeroconf()
+    browser = AsyncServiceBrowser(aiozc.zeroconf, [WIFI_SYNC_SERVICE], handlers=[seen])
+    try:
+        await asyncio.sleep(timeout)
+        infos = [AsyncServiceInfo(WIFI_SYNC_SERVICE, name) for name in names]
+        await asyncio.gather(*(info.async_request(aiozc.zeroconf, 2000) for info in infos))
+    finally:
+        await browser.async_cancel()
+        await aiozc.async_close()
+    return {info.name: [str(ip) for ip in info.ip_addresses_by_version(IPVersion.V4Only)]
+            for info in infos}
+
+
 def discover_wifi(exclude=(), timeout=3):
     """Paired devices announcing themselves on the local network, other than
     the `exclude` UDIDs: {udid: IPv4 address}. Remembers them for
@@ -257,18 +286,19 @@ def discover_wifi(exclude=(), timeout=3):
     if not macs:
         return {}
     try:
-        answers = asyncio.run(browse_mobdev2(timeout=timeout))
+        services = asyncio.run(browse_wifi_sync(timeout))
     except Exception as exc:                            # noqa: BLE001
         logger.info(f"Wi-Fi discovery failed: {exc.__class__.__name__}: {exc}")
         return {}
     found = {}
-    for answer in answers:
-        mac = answer.name.split("@", 1)[0].lower()      # "<wifi mac>@<ipv6>…"
-        ipv4 = next((ip for ip in answer.ips if "." in ip and ":" not in ip), None)
-        if mac in macs and ipv4:
+    for name, ips in services.items():
+        mac = name.split("@", 1)[0].lower()             # "<wifi mac>@<ipv6>…"
+        if mac in macs and ips:
             udid, record = macs[mac]
-            wifi_hosts[udid] = (ipv4, record)
-            found[udid] = ipv4
+            wifi_hosts[udid] = (ips[0], record)
+            found[udid] = ips[0]
+    logger.info(f"Wi-Fi discovery: found {len(found)} of {len(macs)} paired device(s) "
+                f"({len(services)} device(s) announcing on this network)")
     return found
 
 
