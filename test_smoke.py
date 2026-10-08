@@ -130,6 +130,37 @@ finally:
      main.discover_wifi, main.direct_wifi_lockdown) = real
 print("PASS: paired devices on Wi-Fi are listed even when usbmux doesn't; asleep ones get a hint")
 
+# ---- a device that stops answering fails Connect instead of hanging it ---- #
+import threading
+import time
+release = threading.Event()
+
+
+def silent_device(*a, **k):
+    release.wait()
+    raise ConnectionError("gave up")
+
+
+real = (device_manager.DEVICE_ANSWER_TIMEOUT, main.device_lockdown, device_manager.device_lockdown)
+device_manager.DEVICE_ANSWER_TIMEOUT = 0.2
+connect = dict(udid="SILENT", connType="USB", ios_version="26.5", deviceName="iPad")
+try:
+    main.device_lockdown = silent_device         # silent from the Developer Mode check on
+    r = client.post("/connect_device", json=connect).get_json()
+    assert r == {"connected": False, "error": device_manager.NOT_ANSWERING}, r
+    main.device_lockdown = lambda udid, conn: SimpleNamespace(developer_mode_status=True)
+    device_manager.device_lockdown = silent_device   # goes silent while being prepared
+    for attempt in (1, 2):                       # ...and Connect can be pressed again
+        started = time.monotonic()
+        r = client.post("/connect_device", json=connect).get_json()
+        assert time.monotonic() - started < 2, "Connect must give up, not hang"
+        assert r["error"] == device_manager.NOT_ANSWERING and r["device"]["status"] == "error", r
+finally:
+    device_manager.DEVICE_ANSWER_TIMEOUT, main.device_lockdown, device_manager.device_lockdown = real
+    release.set()
+    main.manager.remove("SILENT")
+print("PASS: a device that stops answering fails Connect (and can be retried) instead of hanging it")
+
 # ---- Windows: start Apple's device service when it isn't running --------- #
 import subprocess
 launched, up = [], [False]

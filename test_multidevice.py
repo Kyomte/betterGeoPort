@@ -326,6 +326,37 @@ def main():
         device_manager.wifi_hosts.clear()
     print("PASS: paired devices on Wi-Fi are found and reached without the OS usbmux")
 
+    # 17) a device that stops answering while being prepared fails the check
+    #     instead of hanging it (pymobiledevice3's sockets have no timeout)
+    release = threading.Event()
+
+    def silent_device(*a, **k):
+        release.wait()
+        raise ConnectionError("gave up")
+
+    real = (device_manager.DEVICE_ANSWER_TIMEOUT, device_manager.device_lockdown)
+    device_manager.DEVICE_ANSWER_TIMEOUT = 0.2
+    device_manager.device_lockdown = silent_device
+    try:
+        assert device_manager.device_call(lambda x: x * 2, 21) == 42
+        try:
+            device_manager.device_call(lambda: 1 / 0)
+            raise AssertionError("the call's own errors must come through")
+        except ZeroDivisionError:
+            pass
+        d = mgr.get_or_create("UDID-D", "USB", "26.5", name="iPad-D")
+        started = time.monotonic()
+        try:
+            d.mount_developer_image()
+            raise AssertionError("a silent device must not pass the image check")
+        except device_manager.DeviceNotAnswering as exc:
+            assert str(exc) == device_manager.NOT_ANSWERING
+        assert time.monotonic() - started < 1, "must give up after the time limit"
+    finally:
+        device_manager.DEVICE_ANSWER_TIMEOUT, device_manager.device_lockdown = real
+        release.set()
+    print("PASS: a device that stops answering fails the image check instead of hanging")
+
     print("\nALL MULTI-DEVICE LOGIC TESTS PASSED")
 
 

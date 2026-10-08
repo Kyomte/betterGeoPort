@@ -88,6 +88,38 @@ def _windows_admin():
 LOST_CONNECTION = ("Lost the connection to the device (cable unplugged, Wi-Fi dropped, "
                    "or it went to sleep). Unlock it and press Connect again.")
 
+DEVICE_ANSWER_TIMEOUT = 20
+NOT_ANSWERING = ("The device stopped answering while betterGeoPort was getting it ready. "
+                 "Unlock it, keep the screen on, and press Connect again.")
+
+
+class DeviceNotAnswering(RuntimeError):
+    pass
+
+
+def device_call(fn, *args):
+    """Return fn(*args), but raise DeviceNotAnswering if it hasn't returned
+    within DEVICE_ANSWER_TIMEOUT seconds. pymobiledevice3's device sockets have
+    no timeout, so a device that stops answering mid-request (seen on Windows
+    during Connect) would otherwise block forever. The stuck call is left on a
+    daemon thread, so it can't hold up quitting."""
+    result = {}
+
+    def run():
+        try:
+            result["value"] = fn(*args)
+        except BaseException as exc:                    # noqa: BLE001
+            result["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(DEVICE_ANSWER_TIMEOUT)
+    if worker.is_alive():
+        raise DeviceNotAnswering(NOT_ANSWERING)
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
+
 
 def tunnel_alive(client):
     """False once either direction of a pymobiledevice3 tunnel has stopped or
@@ -298,6 +330,14 @@ class DeviceSession:
             self.last_error = None
             return True
 
+    def fail_connect(self, message):
+        """End a connect that begin_connect() started but that failed before
+        connect() (e.g. preparing the device), so Connect can be pressed again."""
+        with self._state_lock:
+            self.status = "error"
+            self.last_error = message
+        logger.error(f"[{self.name}] connect failed: {message}")
+
     def connect(self):
         """Establish the tunnel (iOS 17+) or lockdown (iOS < 17) for this device."""
         with self._lock:
@@ -469,11 +509,15 @@ class DeviceSession:
         personalized image from GitHub whenever its cached build differs from
         a hard-coded build ID, which is always the case now, so on every
         connect, even when the image is already mounted. That made Connect
-        take minutes on slow Wi-Fi. Check first, and reuse the cached image."""
-        lockdown = device_lockdown(self.udid, self.connection_type)
+        take minutes on slow Wi-Fi. Check first, and reuse the cached image.
+
+        The check is time-limited (device_call): a device that stopped
+        answering here once left Connect stuck on "connecting" for good. The
+        mount itself isn't, as a first-time download can take minutes."""
+        lockdown = device_call(device_lockdown, self.udid, self.connection_type)
         if not is_ios_17_plus(self.ios_version):
             return self._auto_mount(lockdown)
-        if MobileImageMounterService(lockdown=lockdown).is_image_mounted("Personalized"):
+        if device_call(lambda: MobileImageMounterService(lockdown=lockdown).is_image_mounted("Personalized")):
             logger.info(f"[{self.name}] developer image already mounted")
             return
         cache = get_home_folder() / "Xcode_iOS_DDI_Personalized"

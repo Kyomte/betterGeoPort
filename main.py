@@ -37,7 +37,7 @@ from pymobiledevice3.lockdown import create_using_usbmux, create_using_tcp
 
 from tiles import tiles_bp, is_online
 from device_manager import (DeviceManager, is_ios_17_plus, device_lockdown, discover_wifi,
-                            direct_wifi_lockdown, WIFI_ASLEEP)
+                            direct_wifi_lockdown, WIFI_ASLEEP, device_call, DeviceNotAnswering)
 
 # --------------------------------------------------------------------------- #
 # Args / logging / app
@@ -318,9 +318,13 @@ def list_devices_route():
 # --------------------------------------------------------------------------- #
 
 def _check_developer_mode(udid, conn_type):
+    """Whether Developer Mode is on. Raises DeviceNotAnswering if the device
+    doesn't answer (rather than asking the user to enable Developer Mode)."""
     try:
-        ld = device_lockdown(udid, conn_type)   # resolves + caches Wi-Fi IP if needed
-        return bool(ld.developer_mode_status)
+        # device_lockdown resolves + caches the Wi-Fi IP if needed
+        return device_call(lambda: bool(device_lockdown(udid, conn_type).developer_mode_status))
+    except DeviceNotAnswering:
+        raise
     except Exception as exc:                            # noqa: BLE001
         logger.error(f"developer_mode check failed: {exc}")
         return False
@@ -335,7 +339,12 @@ def connect_device():
     if not udid:
         return jsonify({'error': 'No udid provided'}), 400
 
-    if not _check_developer_mode(udid, conn_type):
+    try:
+        developer_mode = _check_developer_mode(udid, conn_type)
+    except DeviceNotAnswering as exc:
+        logger.error(f"[{data.get('deviceName') or udid}] connect failed: {exc}")
+        return jsonify({'connected': False, 'error': str(exc)})
+    if not developer_mode:
         return jsonify({'developer_mode_required': True})
 
     sess = manager.get_or_create(udid, conn_type, ios_version,
@@ -350,6 +359,9 @@ def connect_device():
     # first time; after that the cached copy is reused).
     try:
         sess.mount_developer_image()
+    except DeviceNotAnswering as exc:
+        sess.fail_connect(str(exc))
+        return jsonify({'connected': False, 'device': sess.to_dict(), 'error': str(exc)})
     except Exception as exc:                            # noqa: BLE001
         logger.info(f"[{sess.name}] mount note: {exc.__class__.__name__}: {exc}")
 
