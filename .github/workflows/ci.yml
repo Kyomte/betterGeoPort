@@ -55,6 +55,19 @@ jobs:
         shell: pwsh
         run: ./packaging/build_windows.ps1
 
+      - name: Install to the Start menu, then uninstall (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\betterGeoPort"
+          $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'betterGeoPort.lnk'
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\betterGeoPort'
+          ./dist/betterGeoPort/install_windows.ps1         # as from the extracted zip
+          if (-not ((Test-Path "$dir\betterGeoPort.exe") -and (Test-Path $lnk) -and (Test-Path $key))) { throw 'not installed' }
+          $u = (Get-ItemProperty $key).UninstallString     # what Settings > Apps > Uninstall runs
+          Start-Process cmd.exe -ArgumentList "/c $u" -Wait -NoNewWindow
+          if ((Test-Path $dir) -or (Test-Path $lnk) -or (Test-Path $key)) { throw 'not uninstalled' }
+
       - name: Launch the packaged app and hit its endpoints
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then

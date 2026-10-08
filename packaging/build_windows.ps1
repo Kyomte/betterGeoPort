@@ -21,7 +21,8 @@ Write-Host '[1/3] PyInstaller build...'
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed' }
 
 $Out = Join-Path $Root 'dist\betterGeoPort'
-Write-Host '[2/3] Adding README-Windows.txt...'
+Write-Host '[2/3] Adding README-Windows.txt and install_windows.ps1...'
+Copy-Item (Join-Path $PSScriptRoot 'install_windows.ps1') $Out
 @'
 betterGeoPort for Windows
 =========================
@@ -40,6 +41,12 @@ Run
 
   Keep the console window open while you use it; close it (or press Exit
   in the page) to quit.
+
+Add to the Start menu (optional)
+  Right-click install_windows.ps1 > Run with PowerShell. It copies
+  betterGeoPort to your user folder and adds it to the Start menu and to
+  Settings > Apps > Installed apps, where you can uninstall it. After
+  that you can delete this folder.
 
 Notes
   * Windows SmartScreen may warn because the app is not code-signed:

@@ -100,6 +100,19 @@ This produces `dist\betterGeoPort\betterGeoPort.exe`, plus `betterGeoPort-window
 to share. The exe isn't code-signed, so SmartScreen may warn on first launch
 (*More info → Run anyway*).
 
+#### 4. (optional) Add it to the Start menu
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\install_windows.ps1
+```
+
+This copies the build to `%LOCALAPPDATA%\Programs\betterGeoPort` and adds
+**betterGeoPort** to the Start menu and to *Settings → Apps → Installed apps*, where
+you can uninstall it. It needs no Administrator rights. Run it again after a rebuild
+to update the installed copy. The zip contains the same script: right-click
+`install_windows.ps1` → *Run with PowerShell*. Uninstalling keeps your settings and
+map cache in `%USERPROFILE%\GeoPort`.
+
 ---
 
 ## How to use
@@ -116,8 +129,9 @@ sudo ./run --no-browser --port 54321
 …or just launch **`betterGeoPort.app`** (it prompts for your admin password and opens
 the browser for you).
 
-**Windows:** double-click **`run.bat`**, or **`betterGeoPort.exe`** if you built it, and
-accept the UAC prompt. Your browser opens on `http://localhost:54321`. Keep the
+**Windows:** double-click **`run.bat`**, or **`betterGeoPort.exe`** if you built it (or
+open **betterGeoPort** from the Start menu if you installed it), and accept the UAC
+prompt. Your browser opens on `http://localhost:54321`. Keep the
 console window open while you use it; closing it quits betterGeoPort.
 
 ```powershell
@@ -213,7 +227,7 @@ network device:
 | `tiles.py` | Offline tile cache, area pre-download, cache management |
 | `templates/map.html` | Single-page UI (vendored Leaflet, **no CDNs**) |
 | `static/vendor/leaflet/` | Vendored Leaflet so the UI loads offline |
-| `packaging/` | macOS: `Info.plist`, root-elevating launcher, `build_app.sh`; Windows: `build_windows.ps1`, `AppIcon.ico` |
+| `packaging/` | macOS: `Info.plist`, root-elevating launcher, `build_app.sh`; Windows: `build_windows.ps1`, `install_windows.ps1` (Start menu + Installed apps), `AppIcon.ico` |
 | `run` / `run.bat` | Run-from-source launchers (macOS / Windows) |
 | `test_smoke.py`, `test_multidevice.py` | Hardware-free tests; CI runs them on macOS and Windows and launches the packaged app (`.github/workflows/ci.yml`) |
 
