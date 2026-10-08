@@ -36,7 +36,8 @@ from pymobiledevice3.usbmux import list_devices
 from pymobiledevice3.lockdown import create_using_usbmux, create_using_tcp
 
 from tiles import tiles_bp, is_online
-from device_manager import DeviceManager, is_ios_17_plus, device_lockdown
+from device_manager import (DeviceManager, is_ios_17_plus, device_lockdown, discover_wifi,
+                            direct_wifi_lockdown, WIFI_ASLEEP)
 
 # --------------------------------------------------------------------------- #
 # Args / logging / app
@@ -236,11 +237,11 @@ def refresh_app_meta():
 
 @app.route('/list_devices')
 def list_devices_route():
-    if is_windows and not start_amds(wait=20):
-        return jsonify({'error': _amds_notice()})
+    usbmux_up = not is_windows or start_amds(wait=20)
     try:
         connected = {}
         skipped = []
+        asleep = []
 
         def add(udid, conn_type, info):
             connected.setdefault(udid, {}).setdefault(conn_type, []).append(info)
@@ -257,7 +258,7 @@ def list_devices_route():
             info['ConnectionType'] = 'Network'
             add(args.udid, "Manual Wifi", info)
 
-        for device in list_devices():
+        for device in (list_devices() if usbmux_up else []):
             udid = device.serial
             conn_type = device.connection_type
             try:
@@ -280,8 +281,30 @@ def list_devices_route():
             info['userLocale'] = app_meta.get("user_locale")
             add(udid, "Wifi" if conn_type == "Network" else conn_type, info)
 
-        if skipped and not connected:
-            return jsonify({'error': skipped[0]})
+        # Paired devices on this Wi-Fi that the OS usbmux didn't list (its own
+        # Wi-Fi discovery can stall): reach them directly.
+        on_wifi = {u for u, conns in connected.items() if "Wifi" in conns}
+        for udid in discover_wifi(exclude=on_wifi):
+            try:
+                ld = direct_wifi_lockdown(udid)
+            except OSError:
+                asleep.append(udid)
+                logger.info(f"list_devices: {udid} is on Wi-Fi but not answering (asleep?)")
+                continue
+            except Exception as exc:                    # noqa: BLE001
+                skipped.append(f"{exc.__class__.__name__}: {exc}".rstrip(": "))
+                logger.info(f"list_devices: skipped {udid} (direct Wi-Fi): {skipped[-1]}")
+                continue
+            info = ld.short_info
+            info['wifiState'] = True
+            info['userLocale'] = app_meta.get("user_locale")
+            add(udid, "Wifi", info)
+
+        if not connected:
+            if not usbmux_up:
+                return jsonify({'error': _amds_notice()})
+            if asleep or skipped:
+                return jsonify({'error': WIFI_ASLEEP if asleep else skipped[0]})
         return jsonify(connected)
     except Exception as exc:                            # noqa: BLE001
         logger.error(f"list_devices error: {exc.__class__.__name__}: {exc}")

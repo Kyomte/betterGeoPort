@@ -13,14 +13,18 @@ on-device behaviour matches; they are simply made instance-based and
 thread-safe instead of global.
 """
 
+import os
+import re
 import sys
 import time
 import socket
 import asyncio
 import logging
+import plistlib
 import threading
 
-from pymobiledevice3.lockdown import create_using_usbmux
+from pymobiledevice3.bonjour import browse_mobdev2
+from pymobiledevice3.lockdown import create_using_usbmux, create_using_tcp
 from pymobiledevice3.services.amfi import AmfiService
 from pymobiledevice3.common import get_home_folder
 from pymobiledevice3.services.mobile_image_mounter import (
@@ -149,19 +153,98 @@ else:
         "Wi-Fi, or use USB.")
 
 
+WIFI_ASLEEP = ("Your device is on this Wi-Fi but isn't answering. It's probably asleep: "
+               "unlock it and keep the screen on, then try again.")
+
+
 def device_lockdown(udid, connection_type, discover=False):
     """Return a lockdown for the device over the requested transport.
-    Wi-Fi (Network) requires the OS usbmux (macOS usbmuxd / Windows Apple Mobile
-    Device Service) to have promoted the device to a 'Network' connection — the
-    CoreDevice tunnel only works over that, not over a raw TCP lockdown. Raises
-    a friendly error if the device isn't on Wi-Fi."""
+    Wi-Fi (Network) goes through the OS usbmux (macOS usbmuxd / Windows Apple
+    Mobile Device Service) when it lists the device on Wi-Fi, else straight to
+    the device if discover_wifi() found it. Raises a friendly error if the
+    device isn't reachable over Wi-Fi."""
     conn = "Network" if connection_type in ("Network", "Manual") else "USB"
     try:
         return create_using_usbmux(udid, connection_type=conn, autopair=True)
     except Exception:                                   # noqa: BLE001
-        if conn == "Network":
-            raise RuntimeError(_WIFI_UNAVAILABLE)
-        raise
+        if conn != "Network":
+            raise
+    if udid not in wifi_hosts:
+        raise RuntimeError(_WIFI_UNAVAILABLE)
+    try:
+        return direct_wifi_lockdown(udid)
+    except OSError:
+        raise RuntimeError(WIFI_ASLEEP)
+
+
+# ----- Wi-Fi without the OS usbmux ------------------------------------------ #
+# The OS usbmux only lists a device on Wi-Fi after it has found and connected
+# to it itself, and that can stall (seen on Windows after the computer switched
+# networks) while the device is right there and reachable. So also look for
+# paired devices' Wi-Fi sync announcements (Bonjour _apple-mobdev2._tcp, named
+# after the device's Wi-Fi MAC) and talk to them directly; on the device's
+# side it's the same lockdown connection.
+
+if sys.platform == "win32":
+    PAIR_RECORD_DIRS = [os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"),
+                                     "Apple", "Lockdown")]
+else:
+    PAIR_RECORD_DIRS = ["/var/db/lockdown", "/var/lib/lockdown"]
+wifi_hosts = {}                     # udid -> (IPv4 address, pair record), from discover_wifi()
+
+
+def paired_wifi_macs():
+    """{Wi-Fi MAC: (udid, pair record)} for every device paired with this
+    computer (the OS's pair records, and pymobiledevice3's own)."""
+    found = {}
+    for folder in PAIR_RECORD_DIRS + [str(get_home_folder())]:
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            udid, ext = os.path.splitext(name)
+            if ext != ".plist" or not re.fullmatch(r"[0-9A-Fa-f-]{24,40}", udid):
+                continue
+            try:
+                with open(os.path.join(folder, name), "rb") as f:
+                    record = plistlib.load(f)
+            except Exception:                           # noqa: BLE001
+                continue
+            mac = str(record.get("WiFiMACAddress") or "").lower()
+            if mac and record.get("HostPrivateKey"):
+                found.setdefault(mac, (udid, record))
+    return found
+
+
+def discover_wifi(exclude=(), timeout=3):
+    """Paired devices announcing themselves on the local network, other than
+    the `exclude` UDIDs: {udid: IPv4 address}. Remembers them for
+    device_lockdown(). Doesn't browse if there's nobody else to look for."""
+    macs = {mac: v for mac, v in paired_wifi_macs().items() if v[0] not in exclude}
+    if not macs:
+        return {}
+    try:
+        answers = asyncio.run(browse_mobdev2(timeout=timeout))
+    except Exception as exc:                            # noqa: BLE001
+        logger.info(f"Wi-Fi discovery failed: {exc.__class__.__name__}: {exc}")
+        return {}
+    found = {}
+    for answer in answers:
+        mac = answer.name.split("@", 1)[0].lower()      # "<wifi mac>@<ipv6>…"
+        ipv4 = next((ip for ip in answer.ips if "." in ip and ":" not in ip), None)
+        if mac in macs and ipv4:
+            udid, record = macs[mac]
+            wifi_hosts[udid] = (ipv4, record)
+            found[udid] = ipv4
+    return found
+
+
+def direct_wifi_lockdown(udid):
+    """Lockdown straight to a device discover_wifi() found. Raises OSError
+    (after ~1 s) if it doesn't answer, e.g. it's asleep."""
+    host, record = wifi_hosts[udid]
+    return create_using_tcp(hostname=host, identifier=udid, autopair=False, pair_record=record)
 
 
 class DeviceSession:

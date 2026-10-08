@@ -171,6 +171,13 @@ network device:
   address, so the computer can't recognise it as the device it paired with and
   never offers Wi-Fi. "Fixed" and "Rotating" are still randomised, so it must be
   Off, and it's a per-network setting.
+- **Both:** the OS can be slow to register a device on Wi-Fi, or stop noticing it
+  (seen on Windows after the computer switched networks). So betterGeoPort also
+  looks for paired devices' Wi-Fi announcements itself on **Refresh** and talks to
+  them directly; that needs the device to have been connected by USB once. A
+  device that is asleep doesn't answer: unlock it and keep the screen on while you
+  connect. Wi-Fi doesn't work while the computer is on that iPhone's own Personal
+  Hotspot.
 
 ### Offline maps
 

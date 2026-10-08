@@ -261,6 +261,71 @@ def main():
     clear_simulated_location(FakeDvt(silent=True))
     print("PASS: the reset waits for the device to acknowledge it")
 
+    # 16) Wi-Fi without the OS usbmux: paired devices found by their announcement
+    import os
+    import plistlib
+    import tempfile
+    from pymobiledevice3.bonjour import BonjourAnswer
+    records, home = tempfile.mkdtemp(), tempfile.mkdtemp()
+    udid = "00008150-000C6D3C3C78C01C"
+    for name, rec in ((f"{udid}.plist", {"WiFiMACAddress": "D0:B3:24:10:CD:52", "HostPrivateKey": b"k"}),
+                      ("SystemConfiguration.plist", {"SystemBUID": "x"}),
+                      ("00008030-AAAA.plist", {"WiFiMACAddress": "aa:bb:cc:dd:ee:ff"})):   # no keys
+        with open(os.path.join(records, name), "wb") as f:
+            plistlib.dump(rec, f)
+    real = (device_manager.PAIR_RECORD_DIRS, device_manager.get_home_folder,
+            device_manager.browse_mobdev2, device_manager.create_using_usbmux,
+            device_manager.create_using_tcp)
+    browsed, tcp = [], []
+
+    async def fake_browse(timeout):
+        browsed.append(timeout)
+        return [BonjourAnswer(f"76:b2:be:9f:76:93@fe80::1-supportsRP-26._apple-mobdev2._tcp.local.",
+                              {}, ["192.168.1.206"], 32498),          # private address: unknown
+                BonjourAnswer(f"d0:b3:24:10:cd:52@fe80::d2b3:24ff:fe10:cd52-supportsRP-26._apple-mobdev2._tcp.local.",
+                              {}, ["fe80::1ca9%9", "192.168.1.207"], 32498)]
+
+    def no_usbmux(*a, **k):
+        raise ConnectionRefusedError("not listed by usbmux")
+
+    def fake_tcp(hostname, identifier, autopair, pair_record):
+        tcp.append((hostname, identifier, autopair, pair_record["WiFiMACAddress"]))
+        if hostname == "asleep":
+            raise TimeoutError("timed out")
+        return "lockdown"
+
+    device_manager.PAIR_RECORD_DIRS = [records]
+    device_manager.get_home_folder = lambda: home
+    device_manager.browse_mobdev2 = fake_browse
+    device_manager.create_using_usbmux = no_usbmux
+    device_manager.create_using_tcp = fake_tcp
+    device_manager.wifi_hosts.clear()
+    try:
+        assert device_manager.paired_wifi_macs().keys() == {"d0:b3:24:10:cd:52"}
+        try:
+            device_manager.device_lockdown(udid, "Network")
+            raise AssertionError("not found yet, must say it isn't on Wi-Fi")
+        except RuntimeError as exc:
+            assert str(exc) == device_manager._WIFI_UNAVAILABLE
+        assert device_manager.discover_wifi() == {udid: "192.168.1.207"}
+        assert device_manager.device_lockdown(udid, "Network") == "lockdown"
+        assert tcp == [("192.168.1.207", udid, False, "D0:B3:24:10:CD:52")]
+        browsed.clear()
+        assert device_manager.discover_wifi(exclude={udid}) == {} and not browsed, \
+            "no browsing when usbmux already lists every paired device on Wi-Fi"
+        device_manager.wifi_hosts[udid] = ("asleep", device_manager.wifi_hosts[udid][1])
+        try:
+            device_manager.device_lockdown(udid, "Network")
+            raise AssertionError("an asleep device must give the asleep hint")
+        except RuntimeError as exc:
+            assert str(exc) == device_manager.WIFI_ASLEEP
+    finally:
+        (device_manager.PAIR_RECORD_DIRS, device_manager.get_home_folder,
+         device_manager.browse_mobdev2, device_manager.create_using_usbmux,
+         device_manager.create_using_tcp) = real
+        device_manager.wifi_hosts.clear()
+    print("PASS: paired devices on Wi-Fi are found and reached without the OS usbmux")
+
     print("\nALL MULTI-DEVICE LOGIC TESTS PASSED")
 
 

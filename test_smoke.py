@@ -75,8 +75,9 @@ print(f"PASS: /list_devices -> {r.get_json()}")
 
 # ---- one device that can't be reached doesn't hide the others ------------ #
 from types import SimpleNamespace
-real = (main.list_devices, main.create_using_usbmux, main.start_amds)
+real = (main.list_devices, main.create_using_usbmux, main.start_amds, main.discover_wifi)
 main.start_amds = lambda wait=0: True
+main.discover_wifi = lambda exclude=(): {}       # no real devices on this machine's Wi-Fi
 
 
 def fake_create(udid, connection_type=None, autopair=True):
@@ -93,8 +94,41 @@ try:
     main.list_devices = lambda: [SimpleNamespace(serial="GONE", connection_type="Network")]
     assert "'Number': 3" in client.get("/list_devices").get_json()["error"]
 finally:
-    main.list_devices, main.create_using_usbmux, main.start_amds = real
+    main.list_devices, main.create_using_usbmux, main.start_amds, main.discover_wifi = real
 print("PASS: an unreachable device is skipped, not fatal to the whole list")
+
+# ---- paired devices on Wi-Fi that usbmux didn't list are found directly --- #
+real = (main.list_devices, main.create_using_usbmux, main.start_amds,
+        main.discover_wifi, main.direct_wifi_lockdown)
+excluded = []
+
+
+def fake_discover(exclude=()):
+    excluded.append(set(exclude))
+    return {"WIFI": "192.168.1.207", "ASLEEP": "192.168.1.208"}
+
+
+def fake_direct(udid):
+    if udid == "ASLEEP":
+        raise TimeoutError("timed out")
+    return SimpleNamespace(short_info={"DeviceName": "Wi-Fi phone"})
+
+
+main.start_amds = lambda wait=0: True
+main.create_using_usbmux = fake_create
+main.discover_wifi, main.direct_wifi_lockdown = fake_discover, fake_direct
+try:
+    main.list_devices = lambda: [SimpleNamespace(serial="GOOD", connection_type="Network")]
+    r = client.get("/list_devices").get_json()
+    assert r["WIFI"]["Wifi"][0]["DeviceName"] == "Wi-Fi phone" and "Wifi" in r["GOOD"], r
+    assert "ASLEEP" not in r and excluded[-1] == {"GOOD"}, "usbmux's Wi-Fi devices aren't re-probed"
+    main.list_devices = lambda: []
+    main.discover_wifi = lambda exclude=(): {"ASLEEP": "192.168.1.208"}
+    assert client.get("/list_devices").get_json() == {"error": main.WIFI_ASLEEP}
+finally:
+    (main.list_devices, main.create_using_usbmux, main.start_amds,
+     main.discover_wifi, main.direct_wifi_lockdown) = real
+print("PASS: paired devices on Wi-Fi are listed even when usbmux doesn't; asleep ones get a hint")
 
 # ---- Windows: start Apple's device service when it isn't running --------- #
 import subprocess
