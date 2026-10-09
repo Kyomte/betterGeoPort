@@ -287,11 +287,42 @@ def main():
     def no_usbmux(*a, **k):
         raise ConnectionRefusedError("not listed by usbmux")
 
+    heartbeat = []      # what the device's heartbeat service was sent
+
+    class FakeHeartbeatService:
+        def __init__(self):
+            self.socket = self
+            self.closed = threading.Event()
+            self.messages = [{"Command": "Marco", "Interval": 10, "SupportsSleepyTime": True}]
+
+        def settimeout(self, seconds):
+            heartbeat.append(("timeout", seconds))
+
+        def recv_plist(self):
+            if self.messages:
+                return self.messages.pop(0)
+            self.closed.wait(5)                         # the next one is 10 s away
+            raise OSError("closed")
+
+        def send_plist(self, message):
+            heartbeat.append(message["Command"])
+
+        def close(self):
+            self.closed.set()
+
+    class FakeWifiLockdown:
+        def start_lockdown_service(self, name):
+            heartbeat.append(name)
+            return FakeHeartbeatService()
+
+        def close(self):
+            pass
+
     def fake_tcp(hostname, identifier, autopair, pair_record):
         tcp.append((hostname, identifier, autopair, pair_record["WiFiMACAddress"]))
         if hostname == "asleep":
             raise TimeoutError("timed out")
-        return "lockdown"
+        return FakeWifiLockdown()
 
     device_manager.PAIR_RECORD_DIRS = [records]
     device_manager.get_home_folder = lambda: home
@@ -307,22 +338,36 @@ def main():
         except RuntimeError as exc:
             assert str(exc) == device_manager._WIFI_UNAVAILABLE
         assert device_manager.discover_wifi() == {udid: "192.168.1.207"}
-        assert device_manager.device_lockdown(udid, "Network") == "lockdown"
-        assert tcp == [("192.168.1.207", udid, False, "D0:B3:24:10:CD:52")]
+        assert isinstance(device_manager.device_lockdown(udid, "Network"), FakeWifiLockdown)
+        assert tcp == [("192.168.1.207", udid, False, "D0:B3:24:10:CD:52")] * 2, \
+            "one connection for the heartbeat, one for the caller"
+        assert heartbeat == [device_manager.HEARTBEAT_SERVICE, ("timeout", 30), "Polo"], \
+            "the device refuses services over Wi-Fi without a heartbeat"
+        device_manager.device_lockdown(udid, "Network")
+        assert len(tcp) == 3 and len(heartbeat) == 3, "one heartbeat per device, kept running"
+        hb = device_manager._heartbeats[udid]
+        DeviceSession(udid, "Network", "27.0").disconnect()
+        hb._thread.join(2)
+        assert not hb._thread.is_alive() and udid not in device_manager._heartbeats, \
+            "Disconnect stops the heartbeat"
+        tcp.clear()
         browsed.clear()
         assert device_manager.discover_wifi(exclude={udid}) == {} and not browsed, \
             "no browsing when usbmux already lists every paired device on Wi-Fi"
         device_manager.wifi_hosts[udid] = ("asleep", device_manager.wifi_hosts[udid][1])
+        started = time.monotonic()
         try:
             device_manager.device_lockdown(udid, "Network")
             raise AssertionError("an asleep device must give the asleep hint")
         except RuntimeError as exc:
             assert str(exc) == device_manager.WIFI_ASLEEP
+        assert time.monotonic() - started < 1, "a heartbeat that can't start doesn't hold things up"
     finally:
         (device_manager.PAIR_RECORD_DIRS, device_manager.get_home_folder,
          device_manager.browse_wifi_sync, device_manager.create_using_usbmux,
          device_manager.create_using_tcp) = real
         device_manager.wifi_hosts.clear()
+        device_manager.stop_wifi_heartbeat(udid)
     print("PASS: paired devices on Wi-Fi are found and reached without the OS usbmux")
 
     # 16a) a paired device announcing a private Wi-Fi address (not the MAC in

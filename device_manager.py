@@ -204,6 +204,7 @@ def device_lockdown(udid, connection_type, discover=False):
             raise
     if udid not in wifi_hosts:
         raise RuntimeError(_WIFI_UNAVAILABLE)
+    keep_wifi_heartbeat(udid)                           # or the device refuses its services
     try:
         return direct_wifi_lockdown(udid)
     except OSError:
@@ -363,6 +364,88 @@ def direct_wifi_lockdown(udid):
     (after ~1 s) if it doesn't answer, e.g. it's asleep."""
     host, record = wifi_hosts[udid]
     return create_using_tcp(hostname=host, identifier=udid, autopair=False, pair_record=record)
+
+
+# Straight over Wi-Fi, a device answers lockdown but closes every service
+# connection as soon as it's used (ConnectionAbortedError when checking the
+# developer image, "stream read less than specified amount" in the tunnel
+# handshake) unless the computer also holds a heartbeat connection open to
+# it, as Apple's device service does for the devices it lists. Seen with an
+# iPhone on iOS 27. So keep one per device we reach directly.
+HEARTBEAT_SERVICE = "com.apple.mobile.heartbeat"
+HEARTBEAT_START_TIMEOUT = 5
+HEARTBEAT_SILENCE = 30              # the device sends one every 10 s
+_heartbeats = {}                    # udid -> WifiHeartbeat
+_heartbeats_lock = threading.Lock()
+
+
+class WifiHeartbeat:
+    """Answers a device's heartbeat ("Marco" -> "Polo") on a daemon thread
+    until stop(), or until the device goes quiet or says it's going to sleep."""
+
+    def __init__(self, udid):
+        self.udid = udid
+        self.started = threading.Event()                # first one answered, or gave up
+        self._stopped = threading.Event()
+        self._service = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def alive(self):
+        return self._thread.is_alive() and not self._stopped.is_set()
+
+    def stop(self):
+        self._stopped.set()
+        if self._service is not None:
+            try:
+                self._service.close()                   # ends the blocked recv
+            except Exception:                           # noqa: BLE001
+                pass
+
+    def _run(self):
+        lockdown = None
+        try:
+            lockdown = direct_wifi_lockdown(self.udid)
+            self._service = lockdown.start_lockdown_service(HEARTBEAT_SERVICE)
+            self._service.socket.settimeout(HEARTBEAT_SILENCE)
+            while not self._stopped.is_set():
+                if self._service.recv_plist().get("Command") == "SleepyTime":
+                    logger.info(f"Wi-Fi heartbeat: {self.udid} is going to sleep")
+                    break
+                self._service.send_plist({"Command": "Polo"})
+                if not self.started.is_set():
+                    logger.info(f"Wi-Fi heartbeat: keeping {self.udid} reachable")
+                    self.started.set()
+        except Exception as exc:                        # noqa: BLE001
+            if not self._stopped.is_set():
+                logger.info(f"Wi-Fi heartbeat to {self.udid} ended: "
+                            f"{exc.__class__.__name__}: {exc}".rstrip(": "))
+        finally:
+            self._stopped.set()
+            self.started.set()
+            for conn in (self._service, lockdown):
+                try:
+                    if conn is not None:
+                        conn.close()
+                except Exception:                       # noqa: BLE001
+                    pass
+
+
+def keep_wifi_heartbeat(udid):
+    """Make sure a heartbeat to the device is running, waiting up to
+    HEARTBEAT_START_TIMEOUT seconds for a new one to start."""
+    with _heartbeats_lock:
+        heartbeat = _heartbeats.get(udid)
+        if heartbeat is None or not heartbeat.alive():
+            heartbeat = _heartbeats[udid] = WifiHeartbeat(udid)
+    heartbeat.started.wait(HEARTBEAT_START_TIMEOUT)
+
+
+def stop_wifi_heartbeat(udid):
+    with _heartbeats_lock:
+        heartbeat = _heartbeats.pop(udid, None)
+    if heartbeat is not None:
+        heartbeat.stop()
 
 
 class DeviceSession:
@@ -789,6 +872,7 @@ class DeviceSession:
             except Exception as exc:                    # noqa: BLE001
                 ok, error = False, str(exc)
             self._close_tunnel()
+            stop_wifi_heartbeat(self.udid)
             self.lockdown = None
             self.status = "idle"
             return ok, error
