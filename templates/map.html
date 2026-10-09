@@ -112,6 +112,17 @@
             <li>Hit <b>Refresh</b> — it’ll show up here</li>
           </ol>
         </div>
+        <details id="hostBox" style="margin-top:10px">
+          <summary class="hint" style="cursor:pointer">Can’t see it? Add it by IP address</summary>
+          <div class="row" style="margin-top:6px">
+            <input id="hostInput" type="text" placeholder="e.g. 192.168.1.20" inputmode="decimal" />
+            <button id="hostBtn" class="sm">Add</button>
+          </div>
+          <div class="hint" style="margin-top:6px">Find the address on the device under Settings → Wi-Fi → ⓘ.
+            No Wi-Fi around? Experimental: turn on <b>Personal Hotspot</b> on the iPhone, join it from this
+            computer (Wi-Fi or Bluetooth) and from the iPad, then hit <b>Refresh</b>. The iPhone itself
+            may not be reachable through its own hotspot.</div>
+        </details>
       </section>
 
       <!-- SET LOCATION -->
@@ -618,6 +629,20 @@ document.getElementById("offlineToggle").onclick = (e) => {
   document.getElementById("offlinePanel").classList.toggle("collapsed");
 };
 document.getElementById("refreshBtn").onclick = refreshDevices;
+async function addHost(){
+  const input = document.getElementById("hostInput"), btn = document.getElementById("hostBtn");
+  const ip = input.value.trim();
+  if(!ip) return;
+  btn.disabled = true; btn.textContent = "Looking…";
+  try {
+    const r = await api("/add_wifi_host", {ip});
+    if(r.error){ toast(r.error, "err"); return; }
+    input.value = "";
+    await refreshDevices();
+  } finally { btn.disabled = false; btn.textContent = "Add"; }
+}
+document.getElementById("hostBtn").onclick = addHost;
+document.getElementById("hostInput").addEventListener("keydown", e=>{ if(e.key==="Enter") addHost(); });
 document.getElementById("setAllBtn").onclick = setAll;
 document.getElementById("stopAllBtn").onclick = stopAll;
 document.getElementById("gotoBtn").onclick = () => { const ll=targetLatLng(); if(ll){ map.setView(ll,Math.max(map.getZoom(),12)); targetMarker.setLatLng(ll);} };

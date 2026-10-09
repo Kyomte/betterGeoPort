@@ -18,6 +18,7 @@ import sys
 import time
 import ctypes
 import socket
+import ipaddress
 import signal
 import locale
 import random
@@ -37,7 +38,8 @@ from pymobiledevice3.lockdown import create_using_usbmux, create_using_tcp
 
 from tiles import tiles_bp, is_online
 from device_manager import (DeviceManager, is_ios_17_plus, device_lockdown, discover_wifi,
-                            direct_wifi_lockdown, WIFI_ASLEEP, device_call, DeviceNotAnswering)
+                            add_manual_host, direct_wifi_lockdown, WIFI_ASLEEP, device_call,
+                            DeviceNotAnswering)
 
 # --------------------------------------------------------------------------- #
 # Args / logging / app
@@ -311,6 +313,27 @@ def list_devices_route():
         if is_windows and not _amds_running():
             return jsonify({'error': _amds_notice()})
         return jsonify({'error': str(exc) or exc.__class__.__name__})
+
+
+@app.route('/add_wifi_host', methods=['POST'])
+def add_wifi_host():
+    """Look for a paired device at an address typed in by hand, for networks
+    where it can't be found by itself (e.g. no Bonjour, or a Personal Hotspot)."""
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        addr = ipaddress.IPv4Address(str(data.get('ip') or '').strip())
+    except ValueError:
+        return jsonify({'error': "That isn't an IPv4 address. It looks like 192.168.1.20 "
+                                 "(on the device: Settings → Wi-Fi → ⓘ → IP Address)."}), 400
+    if not (addr.is_private or addr.is_link_local):
+        return jsonify({'error': "Use the device's address on your own network "
+                                 "(like 192.168.x.x, 10.x.x.x or 172.20.10.x)."}), 400
+    udid = add_manual_host(str(addr))
+    if udid is None:
+        return jsonify({'error': f"No paired device answered at {addr}. Is it unlocked, on the "
+                                 f"same network or hotspot as this computer, and has it been "
+                                 f"connected by USB once?"})
+    return jsonify({'udid': udid})
 
 
 # --------------------------------------------------------------------------- #

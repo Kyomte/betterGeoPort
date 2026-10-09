@@ -17,6 +17,7 @@ import device_manager
 tmp = tempfile.mkdtemp()
 tiles.CACHE_ROOT = os.path.join(tmp, "tiles")
 tiles.CONFIG_PATH = os.path.join(tmp, "config.json")
+device_manager.KNOWN_HOSTS_FILE = os.path.join(tmp, "known_hosts.json")   # not the user's own
 os.environ.pop("CARTO_API_KEY", None)
 
 # No network: every upstream tile fetch returns a fake PNG and is recorded.
@@ -129,6 +130,22 @@ finally:
     (main.list_devices, main.create_using_usbmux, main.start_amds,
      main.discover_wifi, main.direct_wifi_lockdown) = real
 print("PASS: paired devices on Wi-Fi are listed even when usbmux doesn't; asleep ones get a hint")
+
+# ---- adding a device by IP address ----------------------------------------- #
+real = main.add_manual_host
+asked = []
+main.add_manual_host = lambda ip: asked.append(ip) or ("PHONE" if ip == "172.20.10.1" else None)
+try:
+    for bad in ("", "phone.local", "300.1.1.1", "8.8.8.8", "::1"):
+        r = client.post("/add_wifi_host", json={"ip": bad})
+        assert r.status_code == 400 and r.get_json()["error"], (bad, r.get_data())
+    assert not asked, "only a local IPv4 address is ever probed"
+    assert client.post("/add_wifi_host", json={"ip": " 172.20.10.1 "}).get_json() == {"udid": "PHONE"}
+    r = client.post("/add_wifi_host", json={"ip": "192.168.1.20"}).get_json()
+    assert "192.168.1.20" in r["error"] and asked == ["172.20.10.1", "192.168.1.20"], r
+finally:
+    main.add_manual_host = real
+print("PASS: /add_wifi_host only probes local IPv4 addresses and says when nothing answers")
 
 # ---- a device that stops answering fails Connect instead of hanging it ---- #
 import threading

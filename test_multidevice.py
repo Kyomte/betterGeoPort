@@ -266,6 +266,7 @@ def main():
     import plistlib
     import tempfile
     records, home = tempfile.mkdtemp(), tempfile.mkdtemp()
+    device_manager.KNOWN_HOSTS_FILE = os.path.join(home, "GeoPort", "known_hosts.json")
     udid = "00008150-000C6D3C3C78C01C"
     for name, rec in ((f"{udid}.plist", {"WiFiMACAddress": "D0:B3:24:10:CD:52", "HostPrivateKey": b"k"}),
                       ("SystemConfiguration.plist", {"SystemBUID": "x"}),
@@ -424,6 +425,79 @@ def main():
         device_manager.wifi_hosts.clear()
         device_manager.wifi_aliases.clear()
     print("PASS: a paired device using a private Wi-Fi address is found by its pair record")
+
+    # 16c) a paired device Bonjour can't see is looked for where it was last
+    #      reached, on an iPhone's Personal Hotspot, or at an address typed in
+    there, probed = {}, []                              # ip -> UDID of what's at that address
+
+    class Answering:
+        def __init__(self, hostname, identifier):
+            self.paired = there.get(hostname) == identifier
+            self.udid = identifier if self.paired else None
+
+        def close(self):
+            pass
+
+    def probing_tcp(hostname, identifier, autopair, pair_record):
+        probed.append(hostname)
+        if hostname not in there:
+            raise TimeoutError("timed out")
+        assert autopair is False, "never asks to pair"
+        return Answering(hostname, identifier)
+
+    async def no_bonjour(timeout):
+        return {}
+
+    async def broken_bonjour(timeout):
+        raise OSError("multicast blocked")
+
+    real = (device_manager.PAIR_RECORD_DIRS, device_manager.get_home_folder,
+            device_manager.browse_wifi_sync, device_manager.create_using_tcp,
+            device_manager.local_ipv4_addresses)
+    device_manager.PAIR_RECORD_DIRS = [records]
+    device_manager.get_home_folder = lambda: home
+    device_manager.browse_wifi_sync = no_bonjour
+    device_manager.create_using_tcp = probing_tcp
+    device_manager.local_ipv4_addresses = lambda: ["192.168.1.5"]
+    known = device_manager.KNOWN_HOSTS_FILE
+    try:
+        if os.path.exists(known):
+            os.remove(known)
+        assert device_manager.discover_wifi(exclude={ipad}) == {} and not probed, \
+            "nothing known and no hotspot: nowhere to look"
+        there["192.168.1.223"] = udid
+        assert device_manager.add_manual_host("192.168.1.99") is None and not device_manager.wifi_hosts, \
+            "an address where no paired device answers adds nothing"
+        assert device_manager.load_known_hosts() == {}
+        assert device_manager.add_manual_host("192.168.1.223") == udid
+        assert device_manager.wifi_hosts[udid][0] == "192.168.1.223"
+        assert device_manager.load_known_hosts() == {udid: "192.168.1.223"}, "remembered across restarts"
+        device_manager.wifi_hosts.clear()
+        probed.clear()
+        assert device_manager.discover_wifi(exclude={ipad}) == {udid: "192.168.1.223"}
+        assert probed == ["192.168.1.223"], "asks the remembered address, not the whole network"
+        device_manager.wifi_hosts.clear()
+        device_manager.browse_wifi_sync = broken_bonjour
+        assert device_manager.discover_wifi(exclude={ipad}) == {udid: "192.168.1.223"}, \
+            "a failed Bonjour browse doesn't stop the known addresses being asked"
+        # on an iPhone's Personal Hotspot (172.20.10.0/28), the iPad joined to it
+        os.remove(known)
+        device_manager.wifi_hosts.clear()
+        there.clear()
+        there["172.20.10.7"] = ipad
+        probed.clear()
+        device_manager.local_ipv4_addresses = lambda: ["172.20.10.2"]
+        assert device_manager.discover_wifi(exclude={udid}) == {ipad: "172.20.10.7"}
+        assert set(probed) == {f"172.20.10.{i}" for i in range(1, 15)} - {"172.20.10.2"}, \
+            "asks everything else on the hotspot, including the iPhone itself"
+        assert device_manager.load_known_hosts() == {ipad: "172.20.10.7"}
+    finally:
+        (device_manager.PAIR_RECORD_DIRS, device_manager.get_home_folder,
+         device_manager.browse_wifi_sync, device_manager.create_using_tcp,
+         device_manager.local_ipv4_addresses) = real
+        device_manager.wifi_hosts.clear()
+        device_manager.wifi_aliases.clear()
+    print("PASS: paired devices are found at remembered, hotspot and hand-typed addresses without Bonjour")
 
     # 16b) the browse keeps every device announcing, not only the first one
     #      (pymobiledevice3's browse_mobdev2 did, so another iPhone hid the iPad)

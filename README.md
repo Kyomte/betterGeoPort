@@ -190,8 +190,16 @@ network device:
   looks for paired devices' Wi-Fi announcements itself on **Refresh** and talks to
   them directly; that needs the device to have been connected by USB once. A
   device that is asleep doesn't answer: unlock it and keep the screen on while you
-  connect. Wi-Fi doesn't work while the computer is on that iPhone's own Personal
-  Hotspot.
+  connect.
+- **Both:** if a paired device still doesn't show up (the network blocks Bonjour,
+  say), betterGeoPort asks the address where it last connected, and you can type
+  the device's address under *Can't see it? Add it by IP address* (on the device:
+  *Settings → Wi-Fi → ⓘ → IP Address*).
+- **No Wi-Fi around (experimental):** turn on **Personal Hotspot** on the iPhone and
+  join it from the computer, over Wi-Fi or Bluetooth. betterGeoPort then looks for
+  paired devices on the hotspot's own addresses (`172.20.10.x`), so an iPad joined to
+  the same hotspot should be found. Reaching the iPhone *itself* through its own
+  hotspot is untested and may not work.
 
 ### Offline maps
 

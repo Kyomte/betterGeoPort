@@ -16,13 +16,16 @@ thread-safe instead of global.
 import os
 import re
 import sys
+import json
 import time
 import socket
 import asyncio
 import logging
 import plistlib
+import ipaddress
 import threading
 
+import psutil
 from zeroconf import DNSQuestionType, IPVersion, ServiceStateChange
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
 from pymobiledevice3.lockdown import create_using_usbmux, create_using_tcp
@@ -228,6 +231,60 @@ wifi_hosts = {}                     # udid -> (IPv4 address, pair record), from 
 wifi_aliases = {}                   # private Wi-Fi MAC -> udid, from identify_wifi_devices()
 IDENTIFY_TIMEOUT = 5
 
+# Where Bonjour can't be relied on (it was dropped on this network, or there is
+# none: an iPhone's Personal Hotspot), paired devices are looked for at
+# addresses we already know: where each was last reached, and the hotspot's.
+KNOWN_HOSTS_FILE = os.path.join(os.path.expanduser("~"), "GeoPort", "known_hosts.json")
+HOTSPOT_NETWORK = ipaddress.ip_network("172.20.10.0/28")        # an iPhone's Personal Hotspot
+
+
+def load_known_hosts():
+    """{udid: IPv4 address} where each device was last reached."""
+    try:
+        with open(KNOWN_HOSTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {udid: ip for udid, ip in data.items() if isinstance(ip, str)}
+
+
+def remember_host(udid, ip):
+    hosts = load_known_hosts()
+    if hosts.get(udid) == ip:
+        return
+    hosts[udid] = ip
+    try:
+        os.makedirs(os.path.dirname(KNOWN_HOSTS_FILE), exist_ok=True)
+        with open(KNOWN_HOSTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(hosts, f, indent=1)
+    except OSError as exc:
+        logger.info(f"Wi-Fi discovery: couldn't remember {udid}'s address: {exc}")
+
+
+def local_ipv4_addresses():
+    try:
+        return [a.address for addrs in psutil.net_if_addrs().values()
+                for a in addrs if a.family == socket.AF_INET]
+    except Exception:                                   # noqa: BLE001
+        return []
+
+
+def hotspot_candidates():
+    """Addresses a device could have on an iPhone's Personal Hotspot (the
+    iPhone itself is 172.20.10.1), if this computer is on one."""
+    mine = set(local_ipv4_addresses())
+    if not any(ip in mine for ip in map(str, HOTSPOT_NETWORK.hosts())):
+        return []
+    return [str(ip) for ip in HOTSPOT_NETWORK.hosts() if str(ip) not in mine]
+
+
+def direct_candidates(skip=()):
+    """Addresses to look for paired devices at without Bonjour."""
+    ips = list(load_known_hosts().values()) + hotspot_candidates()
+    return [ip for ip in dict.fromkeys(ips) if ip not in skip]
+
 
 def paired_wifi_macs():
     """{Wi-Fi MAC: (udid, pair record)} for every device paired with this
@@ -335,7 +392,7 @@ def discover_wifi(exclude=(), timeout=3):
         services = asyncio.run(browse_wifi_sync(timeout))
     except Exception as exc:                            # noqa: BLE001
         logger.info(f"Wi-Fi discovery failed: {exc.__class__.__name__}: {exc}")
-        return {}
+        services = {}                                   # still try the addresses we know
     found, unknown = {}, {}
     for name, ips in services.items():
         mac = name.split("@", 1)[0].lower()             # "<wifi mac>@<ipv6>…"
@@ -352,11 +409,32 @@ def discover_wifi(exclude=(), timeout=3):
             logger.info(f"Wi-Fi discovery: {udid} is using a private Wi-Fi address ({mac})")
             wifi_aliases[mac] = udid
             found[udid] = unknown[mac]
+    missing = {udid: record for udid, record in records.items() if udid not in found}
+    if missing:
+        announced = {ip for ips in services.values() for ip in ips}     # already asked
+        candidates = {ip: ip for ip in direct_candidates(announced)}
+        for ip, udid in identify_wifi_devices(candidates, missing).items():
+            logger.info(f"Wi-Fi discovery: reached {udid} directly at {ip}")
+            found[udid] = ip
     for udid, ip in found.items():
         wifi_hosts[udid] = (ip, records[udid])
+        remember_host(udid, ip)
     logger.info(f"Wi-Fi discovery: found {len(found)} of {len(macs)} paired device(s) "
                 f"({len(services)} device(s) announcing on this network)")
     return found
+
+
+def add_manual_host(ip):
+    """Look for a paired device at `ip` (for when it can't be found by itself).
+    Remembers and returns its UDID, or None if no paired device answers there."""
+    records = dict(paired_wifi_macs().values())         # udid -> pair record
+    udid = identify_wifi_devices({ip: ip}, records).get(ip)
+    if udid is None:
+        return None
+    wifi_hosts[udid] = (ip, records[udid])
+    remember_host(udid, ip)
+    logger.info(f"Wi-Fi discovery: {udid} is at {ip} (added by hand)")
+    return udid
 
 
 def direct_wifi_lockdown(udid):
